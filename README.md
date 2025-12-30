@@ -5,7 +5,7 @@ This is a Christmas '25 project where a [Seeed Studio SenseCAP Indicator D1Pro](
 
 ![Photo of a SenseCAP Indicator D1Pro with an Climate Control UI](/assets/sensecap_ecodan_ui.jpg)
 
-The project targets a Mitsubishi Ecodan ASHP (packetised 868MHz FSK) using hte LoRa SX1262 radio, inconjunction with the climate sensors supplied with the D1Pro. Both microcontrollers ([EspressIf ESP32-S3](https://www.espressif.com/en/products/socs/esp32-s3) & [Raspberry Pi RP2040](https://www.raspberrypi.com/products/rp2040/)) were utilised, hence the two codebases in this repository.
+The project targets a Mitsubishi Ecodan ASHP (packetised 868MHz FSK) using hte LoRa SX1262 radio, inconjunction with the climate sensors supplied with the D1Pro. Both microcontrollers ([Espressif ESP32-S3](https://www.espressif.com/en/products/socs/esp32-s3) & [Raspberry Pi RP2040](https://www.raspberrypi.com/products/rp2040/)) were utilised, hence the two codebases in this repository.
 
 ### Software
 
@@ -21,7 +21,7 @@ Rather than unifying the codebase under a single framework like Arduino IDE or P
     4. CMake Version: Use system version (*Note: Author used [3.31.5](https://cmake.org/download/)*)
     5. On **Location**, click **Change**, then **Select** the `sensecap_indicator_ecodan_rp2040` folder
     6. Click **Import**
-    7. Ensure the *Board* setting is `seeed_xiao_rp2040`
+    7. Ensure the **Board** setting is `seeed_xiao_rp2040`
 
 #### Libraries
 
@@ -37,16 +37,21 @@ Besides the libraries integrated into the SDKs, the following were used:
 - All the RP2040-based I2C sensor work is raw I2C work, to avoid future dependency hell.
 - The ST7701S LCD Panel needs a custom initialisation process. 
 - The author modified their own [ESP32 SX1262 example](https://github.com/jlmurdoch/sx1262_esp32_fsk_example) to deal with nuances of an IO Expander to use the interrupt and busy pins. 
-- Used basic UART functions of the SDKs. [COBS](https://github.com/cmcqueen/cobs-c) ([ESP32 Variant](https://components.espressif.com/components/espp/cobs/versions/1.0.33/readme)) may be used in the future.
+- Used basic UART functions of the SDKs. [COBS](https://github.com/cmcqueen/cobs-c) ([ESP32 Variant](https://components..com/components/espp/cobs/versions/1.0.33/readme)) may be used in the future.
 - LVGL is used for the display UI, with a few free [Font Awesome](https://fontawesome.com) icons imported via the [LVGL Font Converter](https://lvgl.io/tools/fontconverter) for additional heating symbols. 
 
 ### Hardware
 
-As stated in the introduction, the SenseCAP Indicator D1Pro kit has two microcontrollers inside it: a Raspberry Pi RP2040 and an EspressIf ESP32-S3. Both are used in radically different ways, but communicate over a UART connection. The hardware - device alignments are detailed below. If more detail is needed on individual pin functions, see the source code.
+As stated in the introduction, the SenseCAP Indicator D1Pro kit has two microcontrollers inside it: a Raspberry Pi RP2040 and an  ESP32-S3. Both are used in radically different ways, but communicate over a UART connection. The hardware - device alignments are detailed below. If more detail is needed on individual pin functions, see the source code.
 
 #### RP2040 IO Configuration
 
-| Device                   | Interface     | GPIO
+The RP2040 can only communicate data with the outside word using a USB connector, a Micro SD Card, via a Grove connector or the UART link to the ESP32. In the SenseCAP indicator, it comes with:
+* Dual ARM Cortex-M0+ @ 133MHz
+* On-board 264kB SRAM
+* Off-board 2MB / 16Mbit Flash (Quad SPI)
+
+| RP2040                   | Interface     | GPIO
 |--------------------------|---------------|----------
 | SGP40 tVOC Sensor        | I2C[^1] (0x59)| 18 (+V), 20 (SDA), 21 (SCL)
 | SCD41 CO2 Sensor         | I2C[^1] (0x62)| 18 (+V), 20 (SDA), 21 (SCL)
@@ -62,11 +67,31 @@ As stated in the introduction, the SenseCAP Indicator D1Pro kit has two microcon
 [^1]: GPIO 18 needs to be pulled up for the I2C bus to be powered on.
 [^2]: The D1Pro comes with an AHT20 Temperature & Humidity sensor that can be attached to Grove Port B over I2C. The AHT20 I2C address is 0x38.
 
-#### ESP32-S3 IO Configuration
+#### ESP32-S3R8 IO Configuration
 
-The ESP32-S3 is the main conduit to the outside word, with WiFi and LCD Touchscreen:
+The ESP32-S3R8 acts as the main conduit to the outside word, with WiFi, Bluetooth and LCD Touchscreen connectivity. 
 
-| ESP32-S3               | Interface         | GPIO
+As the performance and size demands on ESP32-S3R8 are significant, some optimisations are in order, using the SDK Configuration Editor or `idf.py menuconfig` to set the following:
+* Set the Espressif Device Target as `esp32s3` with `idf.py set-target esp32s3` or `CONFIG_IDF_TARGET_ESP32=esp32s3`
+* Make experimental features visible / `CONFIG_IDF_EXPERIMENTAL_FEATURES=Y`
+* Partition Table (Single factory app (large), no OTA) / `CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE`
+* Bootloader optimization Level (Optimize for performance (-O2)) / `CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_PERF`
+ 
+The basic SenseCAP Indicator spec and SDK config for the ESP32-S3R8 is:
+* Xtensa 32-bit LX7 dual-core processor @ 240MHz
+  * CPU frequency (240 MHz) / `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y`
+* On-board 8MB PSRAM (Octal SPI):
+  * Support for external, SPI-connected RAM / `CONFIG_SPIRAM=y`
+    * Mode (QUAD/OCT) of SPI RAM chip in use (Quad Mode PSRAM) / `CONFIG_SPIRAM_MODE_OCT=y` (EXPERIMENTAL)
+    * Move Instructions in Flash to PSRAM / `CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y`
+    * Move Read-Only Data in Flash to PSRAM / `CONFIG_SPIRAM_RODATA=y`
+    * Set RAM clock speed (120MHz clock speed) / `CONFIG_SPIRAM_SPEED_120M=y` (EXPERIMENTAL)
+* Off-board 8MB / 64Mbit Flash (Quad SPI):
+  * Flash SPI mode (QIO) / `CONFIG_ESPTOOLPY_FLASHMODE_QIO=y`
+  * Flash SPI speed (120 MHz) / `CONFIG_ESPTOOLPY_FLASHFREQ_120M=y` (EXPERIMENTAL)
+  * Flash size (8 MB) / `CONFIG_ESPTOOLPY_FLASHSIZE_8MB=y`
+
+| ESP32-S3R8               | Interface         | GPIO
 |------------------------|-------------------|-----------------
 | WiFi/Bluetooth         | N/A               | N/A
 | Button                 | GPIO              | 38
@@ -96,6 +121,11 @@ Due to large amounts of the ESP32-S3 GPIO being used for the RGB on the LCD, the
 | SX1262 LoRa Radio  | 1    | P13 | TXCO     | Input
 
 [^4]: The IO Expander has a single interrupt assigned to ESP32-S3 GPIO 42 to detect attached pin levels going up/down, which can be used for BUSY, DIO1, INT and TXCO inputs. The IO expander does not elaborate on the exact pin that caused the interrupt. This pin is mislabelled in the high-level schematic as it is in fact wired to ESP-S3 GPIO 42 (not 45, the LCD backlight).
+
+For the UI, it is worth enabling the following in the SDK Configurator (or use `idf.py menuconfig`) to ensure fonts are rendered correctly:
+- `CONFIG_LV_FONT_MONTSERRAT_24`
+- `CONFIG_LV_FONT_MONTSERRAT_34`
+- `CONFIG_LV_FONT_DEFAULT_MONTSERRAT_24`
 
 ### TODO
 
