@@ -76,6 +76,8 @@ As the performance and size demands on ESP32-S3R8 are significant, some optimisa
 * Make experimental features visible / `CONFIG_IDF_EXPERIMENTAL_FEATURES=Y`
 * Partition Table (Single factory app (large), no OTA) / `CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE`
 * Bootloader optimization Level (Optimize for performance (-O2)) / `CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_PERF`
+* Allow app adjust Dummy Cycle bits in SPI Flash for higher frequency / `CONFIG_BOOTLOADER_FLASH_DC_AWARE`
+* High Performance Mode (READ DOCS FIRST, > 80MHz) (Enable) / `SPI_FLASH_HPM_ENA`
  
 The basic SenseCAP Indicator spec and SDK config for the ESP32-S3R8 is:
 * Xtensa 32-bit LX7 dual-core processor @ 240MHz
