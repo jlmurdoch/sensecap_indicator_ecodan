@@ -71,19 +71,19 @@ The ESP32-S3 is the main conduit to the outside word, with WiFi and LCD Touchscr
 | WiFi/Bluetooth         | N/A               | N/A
 | Button                 | GPIO              | 38
 | UART to RP2040         | GPIO (UART)       | 19 (TX), 20 (RX)
-| PCA9535PWR IO Expander | I2C (0x20)        | 39 (SDA), 40 (SCL), 42 (INT)
+| PCA9535PWR IO Expander | I2C (0x20)        | 39 (SDA), 40 (SCL), 42 (INT)[^4]
 | FT6336U Touch Interface| I2C[^3] (0x48)    | 39 (SDA), 40 (SCL)
 | LCD Backlight          | GPIO (PWM)        | 45
 | ST7701S 480x480 LCD    | SPI[^3] , GPIO[^3]| 0-18,21 (RGB IO), 41 (SCK), 48 (MOSI)
 | SX1262 LoRa Radio      | SPI[^3] , GPIO[^3]| 41 (SCK), 47 (MISO), 48 (MOSI)
 
-[^1]: The IO Expander needs to be utilised to work with these devices effectively.
+[^3]: The IO Expander needs to be utilised to work with these devices effectively.
 
 Due to large amounts of the ESP32-S3 GPIO being used for the RGB on the LCD, there's an IO Expander to handle even more GPIO activity:
 
 | IO Expander Device | Port | Pin | Function | Direction
 |--------------------|------|-----|----------|----------
-| Interrupt**        | N/A  | INT | Interrupt| Output
+| Interrupt[^4]        | N/A  | INT | Interrupt| Output
 | SX1262 LoRa Radio  | 0    | P00 | SPI NSS  | Output
 | SX1262 LoRa Radio  | 0    | P01 | Reset    | Output
 | SX1262 LoRa Radio  | 0    | P02 | BUSY     | Input
@@ -95,7 +95,7 @@ Due to large amounts of the ESP32-S3 GPIO being used for the RGB on the LCD, the
 | RP2040             | 1    | P10 | Reset    | Output
 | SX1262 LoRa Radio  | 1    | P13 | TXCO     | Input
 
-** The IO Expander has a single interrupt assigned to ESP32-S3 GPIO 42 to detect attached pin levels going up/down, which can be used for BUSY, DIO1, INT and TXCO inputs. The IO expander does not elaborate on the exact pin that caused the interrupt. This pin is mislabelled in the high-level schematic as it is in fact wired to ESP-S3 GPIO 42 (not 45, the LCD backlight).
+[^4]: The IO Expander has a single interrupt assigned to ESP32-S3 GPIO 42 to detect attached pin levels going up/down, which can be used for BUSY, DIO1, INT and TXCO inputs. The IO expander does not elaborate on the exact pin that caused the interrupt. This pin is mislabelled in the high-level schematic as it is in fact wired to ESP-S3 GPIO 42 (not 45, the LCD backlight).
 
 ### TODO
 
