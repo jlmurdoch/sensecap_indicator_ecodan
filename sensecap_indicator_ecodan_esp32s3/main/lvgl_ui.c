@@ -59,7 +59,6 @@ ui_button_event_user_data_t ui_button_holiday_data = {
 
 static void ui_button_event_callback(lv_event_t *event) {
     ui_button_event_user_data_t *user_data = lv_event_get_user_data(event);
-    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
 
     uint8_t button = user_data->button; // What did we click?
     int8_t value = user_data->value; // Up (+1), Down (-1) or value (+12)
@@ -101,6 +100,7 @@ void ui_main(void) {
     lv_subject_init_string(&ui_clock_subj, ui_clock_text, NULL, sizeof(ui_clock_text), "00:00");
     lv_label_bind_text(label, &ui_clock_subj, NULL);
     lv_obj_align(label, LV_ALIGN_LEFT_MID, 0, 0);
+    lv_obj_set_style_text_font(label, &lv_font_montserrat_24, 0);
 
     /**
      * Eco Dan
@@ -251,5 +251,4 @@ void ui_main(void) {
     lv_label_set_text(label, SYMBOL_HEX_UTF8_SUITCASE);
     lv_obj_set_user_data(obj, &ui_button_holiday_data);
     lv_obj_add_event_cb(obj, ui_button_event_callback, LV_EVENT_CLICKED, &ui_button_holiday_data);
-
 }
