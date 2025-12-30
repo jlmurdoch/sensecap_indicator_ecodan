@@ -18,7 +18,7 @@ Rather than unifying the codebase under a single framework like Arduino IDE or P
     1. Click **Import Project**
     2. Click **Show Advanced Options**
     3. Ninja Version: Use system version *Author used [1.13.1](https://github.com/ninja-build/ninja/releases)*
-    4. CMake Version: Use system version *Author used [3.31.5](from cmake.org)*
+    4. CMake Version: Use system version *Author used [3.31.5](https://cmake.org/download/)*
     5. On **Location**, click **Change**, then **Select** the `sensecap_indicator_ecodan_rp2040` folder
     6. Click **Import**
     7. Ensure the *Board* setting is `seeed_xiao_rp2040`
