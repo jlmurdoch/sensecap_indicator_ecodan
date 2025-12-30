@@ -77,14 +77,15 @@ As the performance and size demands on ESP32-S3R8 are significant, some optimisa
 * Partition Table (Single factory app (large), no OTA) / `CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE`
 * Bootloader optimization Level (Optimize for performance (-O2)) / `CONFIG_BOOTLOADER_COMPILER_OPTIMIZATION_PERF`
 * Allow app adjust Dummy Cycle bits in SPI Flash for higher frequency / `CONFIG_BOOTLOADER_FLASH_DC_AWARE`
-* High Performance Mode (READ DOCS FIRST, > 80MHz) (Enable) / `SPI_FLASH_HPM_ENA`
+* High Performance Mode (READ DOCS FIRST, > 80MHz) (Enable) / `CONFIG_SPI_FLASH_HPM_ENA`
  
 The basic SenseCAP Indicator spec and SDK config for the ESP32-S3R8 is:
 * Xtensa 32-bit LX7 dual-core processor @ 240MHz
   * CPU frequency (240 MHz) / `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y`
 * On-board 8MB PSRAM (Octal SPI):
   * Support for external, SPI-connected RAM / `CONFIG_SPIRAM=y`
-    * Mode (QUAD/OCT) of SPI RAM chip in use (Quad Mode PSRAM) / `CONFIG_SPIRAM_MODE_OCT=y` (EXPERIMENTAL)
+    * Mode (QUAD/OCT) of SPI RAM chip in use (Octal Mode PSRAM) / `CONFIG_SPIRAM_MODE_OCT=y` (EXPERIMENTAL)
+      * Otherwise you will see a rapid cycle of `PSRAM chip is not connected, or wrong PSRAM line mode` 
     * Move Instructions in Flash to PSRAM / `CONFIG_SPIRAM_FETCH_INSTRUCTIONS=y`
     * Move Read-Only Data in Flash to PSRAM / `CONFIG_SPIRAM_RODATA=y`
     * Set RAM clock speed (120MHz clock speed) / `CONFIG_SPIRAM_SPEED_120M=y` (EXPERIMENTAL)
@@ -124,10 +125,14 @@ Due to large amounts of the ESP32-S3 GPIO being used for the RGB on the LCD, the
 
 [^4]: The IO Expander has a single interrupt assigned to ESP32-S3 GPIO 42 to detect attached pin levels going up/down, which can be used for BUSY, DIO1, INT and TXCO inputs. The IO expander does not elaborate on the exact pin that caused the interrupt. This pin is mislabelled in the high-level schematic as it is in fact wired to ESP-S3 GPIO 42 (not 45, the LCD backlight).
 
-For the UI, it is worth enabling the following in the SDK Configurator (or use `idf.py menuconfig`) to ensure fonts are rendered correctly:
-- `CONFIG_LV_FONT_MONTSERRAT_24`
-- `CONFIG_LV_FONT_MONTSERRAT_34`
-- `CONFIG_LV_FONT_DEFAULT_MONTSERRAT_24`
+### LVGL
+
+For the UI, enable the following in SDK Configurator (or use `idf.py menuconfig`) to ensure everything is rendered correctly:
+- `CONFIG_LV_FONT_MONTSERRAT_22` Default Text
+- `CONFIG_LV_FONT_MONTSERRAT_24` Default Font Awesome Icons / Clock Text
+- `CONFIG_LV_FONT_MONTSERRAT_34` Numbers
+- `CONFIG_LV_FONT_DEFAULT_MONTSERRAT_22`
+- `CONFIG_LV_THEME_DEFAULT_DARK`
 
 ### TODO
 
