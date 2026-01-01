@@ -7,12 +7,30 @@
 #include <freertos/FreeRTOS.h> // Needed before task.h
 #include <freertos/task.h>
 
+#define CHART_FIFO_SIZE (86400 / 300)
+
+// Storage for button metadata in button callbacks
 typedef struct {
     uint8_t button;
     int8_t value;
 } ui_button_event_user_data_t;
 
-static void ui_button_event_callback(lv_event_t *event);
+// Storage for chart metadata in chart callbacks
+typedef struct {
+    int32_t y_min;
+    int32_t y_max;
+    void *data;
+    const char title[18];
+    const char *units[8];
+} chart_metadata_t;
+
+// FIFO circular buffer for datapoints
+extern int16_t datapoints_temp[CHART_FIFO_SIZE];
+extern int16_t datapoints_humid[CHART_FIFO_SIZE];
+extern int16_t datapoints_voc[CHART_FIFO_SIZE];
+extern int16_t datapoints_co2[CHART_FIFO_SIZE];
+
+void ui_button_event_callback(lv_event_t *event);
 
 void ui_main(void);
 

@@ -1,34 +1,9 @@
 /**
  * SenseCAP Indicator - Ecodan Monitor - ESP32-S3
- * 
- * Build notes:
- * - idf.py add-dependency esp_io_expander_tca95xx_16bit
- * - idf.py add-dependency esp_lcd_st7701
- * - idf.py add-dependency esp_lcd_panel_io_additions
- * - idf.py add-dependency "lvgl/lvgl^9.4.0"
- * - idf.py add-dependency esp_lcd_touch_ft5x06
- * 
- * SDK Config options:
- * - CONFIG_IDF_EXPERIMENTAL_FEATURES=y
- * - CONFIG_COMPILER_OPTIMIZATION_PERF=y
- * - CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
- * - CONFIG_SPIRAM=y
- * - CONFIG_SPIRAM_MODE_OCT=y
- * - CONFIG_SPIRAM_SPEED=120
- * - CONFIG_SPI_FLASH_HPM_ENA=y
- * - CONFIG_SPI_FLASH_HPM_ON=y
- * - CONFIG_SPI_FLASH_HPM_DC_ON=y
- * - CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240
- * - CONFIG_ESPTOOLPY_FLASHFREQ_120M=y
- * - CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
- * - CONFIG_ESPTOOLPY_OCT_FLASH=y
- * - CONFIG_ESPTOOLPY_FLASHSIZE=8
- * - CONFIG_LV_FONT_MONTSERRAT_24=y
- * - CONFIG_LV_FONT_MONTSERRAT_34=y
+ * See README.md and sdkconfig.defaults
  */
-
 #include "sensecap_indicator_ecodan_esp32s3.h"
-// Secrets for Wifi, Heating ID, etc
+// Secrets for Wifi, Heating ID, etc - use secrets.h.template to create your own
 #include "secrets.h"
 
 // Enumeration of Ecodan remote buttons
@@ -46,6 +21,16 @@ volatile int queueLength = 0;
 
 // Task handle to connect IO Expander ISR to IO Expander Task
 TaskHandle_t ioExpanderInterruptTaskHandle = NULL;
+
+// FIFO circular buffer for datapoints
+int16_t datapoints_temp[CHART_FIFO_SIZE];
+int16_t datapoints_humid[CHART_FIFO_SIZE];
+int16_t datapoints_voc[CHART_FIFO_SIZE];
+int16_t datapoints_co2[CHART_FIFO_SIZE];
+
+// Temperatures to use if nothing available to TX
+uint8_t ecodan_amb_temp = 0xA6;
+uint8_t ecodan_set_temp = 0xA6;
 
 /**
  * @brief Non-ISR task to handle interrupts from the IO Expander
@@ -339,13 +324,13 @@ void lcd_backlight_init(gpio_num_t bl_pin){
         .timer_sel      = LEDC_TIMER_0,
         .intr_type      = LEDC_INTR_DISABLE,
         .gpio_num       = bl_pin,
-        .duty           = 8109, // Set duty to 99%
+        .duty           = 8192, // Set duty to 99%
         .hpoint         = 0
     };
     ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
 
     // Turn on the backlight
-    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 8109));
+    ESP_ERROR_CHECK(ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 512));
     ESP_ERROR_CHECK(ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0));
 }
 
@@ -575,7 +560,9 @@ static lv_disp_t *lcd_display_init(i2c_master_bus_handle_t i2c_handle, esp_io_ex
      * 6. Manage LVGL timers
      */
     // Task to call the LVGL timer in a controlled, thread-safe fashion
-    xTaskCreate(manage_lv_timer_handler_task, "LVGL Timer Handler Task", 5120, NULL, 2, NULL);
+    // xTaskCreate(manage_lv_timer_handler_task, "LVGL Timer Handler Task", 5120, NULL, 2, NULL);
+    xTaskCreate(manage_lv_timer_handler_task, "LVGL Timer Handler Task", 10480, NULL, 2, NULL);
+
 
     /**
      * 7. Set a theme
@@ -737,11 +724,31 @@ static void ui_button_event_task(void *pvParameters) {
              * 44 04 03 10 22 A6 A7 02 06 - Down
              * ^^          ^^ ^^ ^^
              */
-            case ECODAN_TEMPUP:   
-                continue;
-                break;            
-            case ECODAN_TEMPDOWN: 
-                continue;
+            case ECODAN_TEMPUP:
+                printf("Temp Up Button - ");
+                action_frame.pkt.msg.type = 0x44; // Temp Change
+                action_frame.pkt.msg.unka = 0x04;
+                action_frame.pkt.msg.unkb = 0x03;
+                action_frame.pkt.msg.data_len = sizeof(action_frame.pkt.msg.data);
+                action_frame.pkt.msg.data[0] = 0x22; // Temp Change
+                action_frame.pkt.msg.data[1] = ++ecodan_set_temp; // 
+                action_frame.pkt.msg.data[2] = ecodan_amb_temp; // Current temperature from RC
+                action_frame.pkt.msg.data[3] = 0x02;
+                action_frame.pkt.msg.data[4] = 0x06;
+                action_frame.pkt.msg_crc = crc8((uint8_t *)&action_frame.pkt.msg, sizeof(action_frame.pkt.msg));
+                break;
+            case ECODAN_TEMPDOWN:
+                printf("Temp Down Button - ");
+                action_frame.pkt.msg.type = 0x44; // Temp Change
+                action_frame.pkt.msg.unka = 0x04;
+                action_frame.pkt.msg.unkb = 0x03;
+                action_frame.pkt.msg.data_len = sizeof(action_frame.pkt.msg.data);
+                action_frame.pkt.msg.data[0] = 0x22; // Temp Change
+                action_frame.pkt.msg.data[1] = --ecodan_set_temp; // 
+                action_frame.pkt.msg.data[2] = ecodan_amb_temp; // Current temperature from RC
+                action_frame.pkt.msg.data[3] = 0x02;
+                action_frame.pkt.msg.data[4] = 0x06;
+                action_frame.pkt.msg_crc = crc8((uint8_t *)&action_frame.pkt.msg, sizeof(action_frame.pkt.msg));
                 break;
             /**
              * Hot Water Boost
@@ -749,7 +756,15 @@ static void ui_button_event_task(void *pvParameters) {
              * ^^          ^^ ^^
              */
             case ECODAN_HOTWATER:
-                continue;
+                printf("Hot Water Button - ");
+                action_frame.pkt.msg.type = 0x45; // Hot Water
+                action_frame.pkt.msg.unka = 0x04;
+                action_frame.pkt.msg.unkb = 0x03;
+                action_frame.pkt.msg.data_len = sizeof(action_frame.pkt.msg.data);
+                action_frame.pkt.msg.data[0] = 0x24; // Hot Water
+                action_frame.pkt.msg.data[1] = 0x01; // Set on
+                action_frame.pkt.msg.data[2] = 0x06;
+                action_frame.pkt.msg_crc = crc8((uint8_t *)&action_frame.pkt.msg, sizeof(action_frame.pkt.msg));
                 break;
             /**
              * Holiday Mode 
@@ -759,6 +774,7 @@ static void ui_button_event_task(void *pvParameters) {
              * ^^          ^^ ^^ ^^   
              */
             case ECODAN_HOLIDAY:
+                printf("Holiday Button - ");
                 action_frame.pkt.msg.type = 0x46; // Holiday
                 action_frame.pkt.msg.unka = 0x04;
                 action_frame.pkt.msg.unkb = 0x03;
@@ -767,15 +783,14 @@ static void ui_button_event_task(void *pvParameters) {
                 action_frame.pkt.msg.data[1] = 0x01; // Set on
                 action_frame.pkt.msg.data[2] = 0x03; // 01 hours = 01 + 02 (* 30 mins)
                 action_frame.pkt.msg.data[3] = 0x06;
-                // Take this out for now for testing
                 action_frame.pkt.msg_crc = crc8((uint8_t *)&action_frame.pkt.msg, sizeof(action_frame.pkt.msg));
                 break;
             
             default:
-                break;
+                printf("Unknown Button - ");
+                continue;
             }
 
-            printf("Frame Data to send: ");
             for (int x = 0; x < sizeof(action_frame); x++) {
                 printf(" %02x", ((uint8_t *)&action_frame)[x]);
             }
@@ -1010,23 +1025,51 @@ void app_main(void)
             for (int x=0; x < MAX_PACKET_SIZE; x++) {
                 printf("%02x ", ((uint8_t *)&frame)[x]);
             }
+
+            // Just some verbosity to show if we have a passing CRC
             if (frame.pkt.msg_crc == crc8((uint8_t *)&frame.pkt.msg, sizeof(frame.pkt.msg))) {
                 printf("CRC Pass\n");
             } else {
                 printf("CRC Fail\n");
             }
 
-            // Update UI: Ecodan RC Reporting Ambient Temperature
+            // Ecodan RC Reporting Ambient Temperature
             if ((frame.id_msb == ECODAN_RC_ID_MSB) && (frame.id_lsb == ECODAN_RC_ID_LSB) && (frame.pkt.msg.type == 0x43)) {
                 char buf[6];
+                // Record the Ambient Temp for TX usage
+                ecodan_amb_temp = frame.pkt.msg.data[1];
+                // Update the LVGL Ambient Temp label
                 lv_snprintf(buf, sizeof(buf), "%d.%d", (frame.pkt.msg.data[1] - 128) / 2, (frame.pkt.msg.data[1] % 2) * 5);
                 lv_subject_copy_string(&ui_ed_temp_amb_subj, buf);
             }
-            // Update UI: Ecodan FTC Reporting Set Temperature and Functional State
+            /**
+             * Ecodan FTC Reporting Set Temperature and Functional State
+             * 63 04 03 10 -- Standard reporting in
+             * 00 - Standard reporting in
+             * 01 - 
+             * 02 - 
+             * a6 - set temp
+             * 02 
+             * 00
+             * 01 - Holiday mode
+             * 05 
+             * 03 - Holiday length
+             * 06 
+             * 06 
+             * ff 
+             * 00 
+             * bd 
+             * 00 
+             * 00
+             */ 
             if ((frame.id_msb == ECODAN_FTC_ID_MSB) && (frame.id_lsb == ECODAN_FTC_ID_LSB) && (frame.pkt.msg.type == 0x63)) {
                 char buf[6];
+                // Record the Set Temp for TX usage
+                ecodan_set_temp = frame.pkt.msg.data[3];
+                // Update the LVGL Set Temp label
                 lv_snprintf(buf, sizeof(buf), "%d.%d", (frame.pkt.msg.data[3] - 128) / 2, (frame.pkt.msg.data[3] % 2) * 5);
                 lv_subject_copy_string(&ui_ed_temp_set_subj, buf);
+                // State reporting of heating
                 switch (frame.pkt.msg.data[2])
                 {
                 case 0x01: // Hot water?
@@ -1064,25 +1107,40 @@ void app_main(void)
             uart_read_bytes(UART_NUM_2, uart_buf, uart_len, 100 / portTICK_PERIOD_MS);
         
             // Update UI Temp
-            float temp = -45.0 + 175.0 * (strtoul((char *)uart_buf+7, NULL, 16) / 65535.0);
+            uint16_t raw_temp = strtoul((char *)uart_buf+7, NULL, 16);
+            float temp = -45.0 + 175.0 * (raw_temp / 65535.0);
             char temp_text[6];
             lv_snprintf(temp_text, sizeof(temp_text), "%d.%d", (int)temp, ((int)(temp * 10) % 10));
             lv_subject_copy_string(&ui_sensor_temp_subj, temp_text);
 
             // Update UI Relative Humidity
-            float relh = strtoul((char *)uart_buf, NULL, 16) / 65535.0 * 100.0;
-            lv_subject_set_int(&ui_sensor_rh_subj, (int32_t)relh);
+            uint16_t raw_relh = strtoul((char *)uart_buf, NULL, 16);
+            float human_relh = raw_relh / 65535.0 * 100.0;
+            lv_subject_set_int(&ui_sensor_rh_subj, (int32_t)human_relh);
 
             // Update UI CO2
-            uint16_t co2 = strtoul((char *)uart_buf+14, NULL, 16);
-            lv_subject_set_int(&ui_sensor_co2_subj, (int32_t)co2);
+            uint16_t raw_co2 = strtoul((char *)uart_buf+14, NULL, 16);
+            lv_subject_set_int(&ui_sensor_co2_subj, (int32_t)raw_co2);
 
             // Update UI VOC
-            int32_t voc = strtoll((char *)uart_buf+27, NULL, 16);
-            lv_subject_set_int(&ui_sensor_voc_subj, voc);
+            int32_t raw_voc = strtoll((char *)uart_buf+27, NULL, 16);
+            lv_subject_set_int(&ui_sensor_voc_subj, raw_voc);
+
+            // Get the time, to use to store datapoint into storage
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            int pos = ((tv.tv_sec % 86400) / 300);
+
+            // Now store those datapoints with light converstion
+            datapoints_co2[pos] = raw_co2;
+            datapoints_voc[pos] = raw_voc;
+            // Multiply humidity by 10x to retain .1f precision
+            datapoints_humid[pos] = raw_relh / 65.535;
+            // Multiply temperature by 10x to retain .1f precision
+            datapoints_temp[pos] = -450 + 1750 * (raw_temp / 65535.0);
 
             // Print out for the ESP32 console
-            printf("UART Receive: %.0f,%.1f,%d,%ld\n", relh, temp, co2, voc);
+            printf("UART Receive: %.0f,%.1f,%d,%ld\n", human_relh, temp, raw_co2, raw_voc);
         } else if (uart_len > 34) {
             // Flush out any UART noise
             uart_flush(UART_NUM_2);
