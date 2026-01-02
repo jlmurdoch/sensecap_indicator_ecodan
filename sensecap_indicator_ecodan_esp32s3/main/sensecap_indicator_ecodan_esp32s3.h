@@ -227,10 +227,13 @@ typedef struct {
     ecodan_pkt_t pkt; 
 } ecodan_frame_t;
 
-// Struct to pass SPI + IO Expander details into callbacks
+// Struct to contain all major sensecap IO handles of the sensecap
 typedef struct {
-    spi_device_handle_t *spi;
-    esp_io_expander_handle_t *io_exp;
+    spi_device_handle_t spi;
+    i2c_master_bus_handle_t i2c;
+    esp_lcd_panel_handle_t panel;
+    esp_lcd_touch_handle_t touch;
+    esp_io_expander_handle_t ioexp;
 } sensecap_io_handle_t;
 
 /**< Sensecap Indicator ST7701S initialisation commands */
@@ -279,6 +282,8 @@ static const st7701_lcd_init_cmd_t sensecap_panel_init_cmds[] = {
     {0x3A, (uint8_t []){0x60}, 1, 0}, // Interface Pixel Format (16/18/24)
     {0x21, (uint8_t []){0x00}, 0, 120}, // Display Inversion On
     {0x11, (uint8_t []){0x00}, 0, 120}, // Sleep Out
+
+    {0x29, (uint8_t []){0x00}, 0, 0}, // Display On
 };
 
 #endif

@@ -12,6 +12,9 @@ enum ecodan_actions { ECODAN_TEMPUP = 1, ECODAN_TEMPDOWN, ECODAN_HOTWATER, ECODA
 // Task to process button clicks with SPI + I2C data
 TaskHandle_t uiButtonTaskHandle = NULL;
 
+TaskHandle_t edRxTaskHandle = NULL;
+TaskHandle_t rp2040TaskHandle = NULL;
+
 // WiFi Retry counter
 static int s_wifi_retry_num = 0;
 
@@ -32,13 +35,20 @@ int16_t datapoints_co2[CHART_FIFO_SIZE];
 uint8_t ecodan_amb_temp = 0xA6;
 uint8_t ecodan_set_temp = 0xA6;
 
+// Store for all major SenseCAP IO handles
+sensecap_io_handle_t sensecap_io = {
+    .spi = NULL,
+    .ioexp = NULL,
+    .i2c = NULL,
+    .touch = NULL,
+    .panel = NULL
+};
+
 /**
  * @brief Non-ISR task to handle interrupts from the IO Expander
  */
 void io_expander_isr_task(void *pvParameters) {
-    sensecap_io_handle_t *io_handle = (sensecap_io_handle_t *) pvParameters;
-    spi_device_handle_t *spi = io_handle->spi;
-    esp_io_expander_handle_t *io_exp = io_handle->io_exp;
+    sensecap_io_handle_t *sci_io = (sensecap_io_handle_t *) pvParameters;
 
     // State 
     uint32_t io_exp_state;
@@ -52,18 +62,18 @@ void io_expander_isr_task(void *pvParameters) {
         // If we get a notify
         if (messagesToProcess) {
             // Check to see it's DIO1
-            esp_io_expander_get_level(*io_exp, IOEXP_PORT0_LORA_DIO1, &io_exp_state);
+            esp_io_expander_get_level(sci_io->ioexp, IOEXP_PORT0_LORA_DIO1, &io_exp_state);
             if ((io_exp_state & IOEXP_PORT0_LORA_DIO1) == IOEXP_PORT0_LORA_DIO1) {  
                 // We have an interrupt, lets store it
-                uint16_t irqstatus = getIRQStatus(*spi, *io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
+                uint16_t irqstatus = getIRQStatus(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
                 
                 // Clear the status ASAP to free up DIO1
-                clearIRQStatus(*spi, *io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
+                clearIRQStatus(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
 
                 // Check IRQ to see if RxDone (0x02) and not anything else (i.e. CRC Error (0x40))
                 if ((irqstatus == IRQ_RXDONE)) {
                     // Get the data location (offset) and size
-                    uint16_t rxbuf = getRxBufferStatus(*spi, *io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
+                    uint16_t rxbuf = getRxBufferStatus(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
                     uint8_t length = (uint8_t)((rxbuf >> 8) & 0xFF);
                     uint8_t offset = (uint8_t)(rxbuf & 0xFF);
 
@@ -72,7 +82,7 @@ void io_expander_isr_task(void *pvParameters) {
                         // Make space for the data
                         uint8_t *data = malloc(length);
                         // Read it off the buffer into the space
-                        readBuffer(*spi, *io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, offset, length, data);
+                        readBuffer(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, offset, length, data);
                         // Pop the data onto the queue
                         xQueueSend(queueMsg, data, portMAX_DELAY);
                         // Increment the queue length
@@ -241,41 +251,6 @@ static void lcd_touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data) {
 }
 
 /**
- * @brief Update the clock in the UI
- */
-void update_ui_clock(void *arg) {
-    time_t now;
-    char buf[6]; 
-    struct tm timeinfo;
-
-    time(&now);
-    setenv("TZ", "BST", 1);
-    tzset();
-
-    localtime_r(&now, &timeinfo);
-    if (timeinfo.tm_sec == 0) {
-        strftime(buf, sizeof(buf), "%H:%M", &timeinfo);
-        lv_subject_copy_string(&ui_clock_subj, buf);
-    }
-}
-
-/**
- * @brief Start the clock timer for the UI
- */
-void start_clock(void) {
-    esp_timer_handle_t periodic_timer;
-    // Callback setup for tick timer
-    const esp_timer_create_args_t periodic_timer_args = {
-        .callback = &update_ui_clock,
-        .name = "timer_clock"
-    };
-    // Instantiate the tick timer
-    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-    // Trigger tick increment every 1000us / 1ms
-    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000000));
-}
-
-/**
  * @brief Increment the LVGL tick timer
  */
 static void lv_tick_task(void *arg) {
@@ -339,7 +314,7 @@ void lcd_backlight_init(gpio_num_t bl_pin){
  * @note This is a ST7701S Panel (SPI+RGB) with FT5x06 Touch device (I2C)
  * @note Need to use the IO Expander onboard
  */
-void sensecap_indicator_lcd_drivers_init(i2c_master_bus_handle_t i2c_handle, esp_io_expander_handle_t io_expander, esp_lcd_panel_handle_t *panel_handle, esp_lcd_touch_handle_t *touch_handle) {
+void sensecap_indicator_lcd_drivers_init(sensecap_io_handle_t *sci_io) {
     /**
      * Touch Device IO
      */
@@ -356,7 +331,7 @@ void sensecap_indicator_lcd_drivers_init(i2c_master_bus_handle_t i2c_handle, esp
         .scl_speed_hz = 400 * 1000,
     };
     esp_lcd_panel_io_handle_t touch_io_handle = NULL;
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(i2c_handle, &touch_io_config, &touch_io_handle));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c(sci_io->i2c, &touch_io_config, &touch_io_handle));
 
     // Now add the I2C Touch Device
     esp_lcd_touch_config_t touch_config = {
@@ -374,7 +349,7 @@ void sensecap_indicator_lcd_drivers_init(i2c_master_bus_handle_t i2c_handle, esp
             .mirror_y = 1, // Reversed on SenseCAP Indicator
         },
     };
-    ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_ft5x06(touch_io_handle, &touch_config, touch_handle));
+    ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_ft5x06(touch_io_handle, &touch_config, &sci_io->touch));
     
     /**
      * Panel Device IO
@@ -388,7 +363,7 @@ void sensecap_indicator_lcd_drivers_init(i2c_master_bus_handle_t i2c_handle, esp
         // IO Expander is used for NSS pin
         .cs_io_type = IO_TYPE_EXPANDER, 
         .cs_expander_pin = IOEXP_PORT0_LCD_NSS,
-        .io_expander = io_expander,
+        .io_expander = sci_io->ioexp,
     };
 
     // Create new 3-wire SPI config for the panel (non-standard SPI)
@@ -459,7 +434,7 @@ void sensecap_indicator_lcd_drivers_init(i2c_master_bus_handle_t i2c_handle, esp
     st7701_vendor_config_t st7701_vendor_config = {
         .rgb_config = &rgb_config,
         .flags = { 
-            .auto_del_panel_io = 0,
+            .auto_del_panel_io = 1,
         },
         .init_cmds = sensecap_panel_init_cmds,
         .init_cmds_size = sizeof(sensecap_panel_init_cmds) / sizeof(st7701_lcd_init_cmd_t),
@@ -474,13 +449,9 @@ void sensecap_indicator_lcd_drivers_init(i2c_master_bus_handle_t i2c_handle, esp
     };
     
     // Create the panel
-    ESP_ERROR_CHECK(esp_lcd_new_panel_st7701(panel_io_handle, &panel_config, panel_handle));
-    // Reset the panel - has to be done before esp_lcd_panel_init()
-    ESP_ERROR_CHECK(esp_lcd_panel_reset(*panel_handle));
-    // Initialise the panel
-    ESP_ERROR_CHECK(esp_lcd_panel_init(*panel_handle));
-    // Turn on the panel display
-    ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(*panel_handle, true));
+    ESP_ERROR_CHECK(esp_lcd_new_panel_st7701(panel_io_handle, &panel_config, &sci_io->panel));
+    // Initialise the panel - this will also turn it on, so we can delete the SPI IO
+    ESP_ERROR_CHECK(esp_lcd_panel_init(sci_io->panel));
 }
 
 /**
@@ -490,7 +461,7 @@ void sensecap_indicator_lcd_drivers_init(i2c_master_bus_handle_t i2c_handle, esp
  * @return `lv_disp_t` - Handle for the display
  * @note Following the process here: https://docs.lvgl.io/master/integration/overview/connecting_lvgl.html
  */
-static lv_disp_t *lcd_display_init(i2c_master_bus_handle_t i2c_handle, esp_io_expander_handle_t io_expander) {
+static lv_disp_t *lcd_display_init(sensecap_io_handle_t *sci_io) {
     /**
      * 1. Initialise LVGL
      */
@@ -499,9 +470,7 @@ static lv_disp_t *lcd_display_init(i2c_master_bus_handle_t i2c_handle, esp_io_ex
     /**
      * 2. Initialise Panel & Touch Drivers
      */
-    esp_lcd_panel_handle_t panel_handle = NULL;
-    esp_lcd_touch_handle_t touch_handle = NULL;
-    sensecap_indicator_lcd_drivers_init(i2c_handle, io_expander, &panel_handle, &touch_handle);
+    sensecap_indicator_lcd_drivers_init(sci_io);
 
     /**
      * 3. Tick Interface
@@ -532,12 +501,12 @@ static lv_disp_t *lcd_display_init(i2c_master_bus_handle_t i2c_handle, esp_io_ex
     // Set up a double frame buffer
     void *fb1 = NULL;
     void *fb2 = NULL;
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel_handle, 2, &fb1, &fb2));
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(sci_io->panel, 2, &fb1, &fb2));
     // Set buffers for display
     lv_display_set_buffers(display, fb1, fb2, LCD_RES_H * LCD_RES_V * lv_color_format_get_size(lv_display_get_color_format(display)), LV_DISPLAY_RENDER_MODE_DIRECT);
 
     // Associate RGB panel with LVGL display for callback
-    lv_display_set_user_data(display, panel_handle);
+    lv_display_set_user_data(display, sci_io->panel);
 
     // Create flush callback for lvgl
     lv_display_set_flush_cb(display, lcd_panel_flush_callback); 
@@ -545,7 +514,7 @@ static lv_disp_t *lcd_display_init(i2c_master_bus_handle_t i2c_handle, esp_io_ex
     esp_lcd_rgb_panel_event_callbacks_t panel_callbacks = {
         .on_color_trans_done = lcd_panel_flush_ready_callback,
     };
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(panel_handle, &panel_callbacks, display));
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(sci_io->panel, &panel_callbacks, display));
 
     /**
      * 5. Input-Device Interface (indev)
@@ -553,16 +522,14 @@ static lv_disp_t *lcd_display_init(i2c_master_bus_handle_t i2c_handle, esp_io_ex
     lv_indev_t *indev = lv_indev_create();
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_display(indev, display);
-    lv_indev_set_user_data(indev, touch_handle);
+    lv_indev_set_user_data(indev, sci_io->touch);
     lv_indev_set_read_cb(indev, lcd_touch_read_callback);
 
     /**
      * 6. Manage LVGL timers
      */
     // Task to call the LVGL timer in a controlled, thread-safe fashion
-    // xTaskCreate(manage_lv_timer_handler_task, "LVGL Timer Handler Task", 5120, NULL, 2, NULL);
     xTaskCreate(manage_lv_timer_handler_task, "LVGL Timer Handler Task", 10480, NULL, 2, NULL);
-
 
     /**
      * 7. Set a theme
@@ -590,7 +557,7 @@ uint8_t crc8(uint8_t *buf, uint8_t size) {
   return crc;
 }
 
-void sx1262_sensecap_init(spi_device_handle_t spi, esp_io_expander_handle_t io_exp) {
+void sx1262_sensecap_init(sensecap_io_handle_t *sci_io) {
     // Set up the SX1262 packet data
     uint8_t syncword[] = { SYNCWORD };
     uint8_t filter[] = { NODE_ADDRESS, BROADCAST_ADDRESS };
@@ -599,23 +566,38 @@ void sx1262_sensecap_init(spi_device_handle_t spi, esp_io_expander_handle_t io_e
     // Set the power boot for receving
     uint8_t rxgain[] = { RX_GAIN_POWER_BOOST };
 
+    // Configure a generic SPI device
+    spi_device_interface_config_t sx1262_cfg = {
+        .mode = 0,
+        .clock_speed_hz = SPI_MASTER_FREQ_11M,  // Can't use 16MHz - causes SPI issues regardless of DMA setting
+        .spics_io_num = -1,                     // NSS / CS line -- TODO EXPANDER
+        .queue_size = 1,                        // Mandatory to have queue size
+        .command_bits = 8,                      // All commands are 8 bits in length
+        .address_bits = 0,                      // Only used for read / write operations on registers and buffers
+        .dummy_bits = 0,                        // Only used on write
+        .flags = SPI_DEVICE_HALFDUPLEX          // The radio needs half-duplex for dummy bits and NOPs
+    };
+
+    // Attach the SX1262 to the SPI bus
+    ESP_ERROR_CHECK(spi_bus_add_device(SPI_HOST_ID, &sx1262_cfg, &sci_io->spi));
+
     /************************************
      * RADIO RESET VIA IO EXPANDER
      ************************************/
     // Power-on - RST needs to be pulled-up!
-    ESP_ERROR_CHECK(esp_io_expander_set_level(io_exp, IOEXP_PORT0_LORA_RST, 1));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(sci_io->ioexp, IOEXP_PORT0_LORA_RST, 1));
     
     // Wait for 100us
     usleep(100);
     
     // Pull down reset
-    ESP_ERROR_CHECK(esp_io_expander_set_level(io_exp, IOEXP_PORT0_LORA_RST, 0));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(sci_io->ioexp, IOEXP_PORT0_LORA_RST, 0));
 
     // Wait for 100us (See 8.1)
     usleep(100);
     
     // Release reset
-    ESP_ERROR_CHECK(esp_io_expander_set_level(io_exp, IOEXP_PORT0_LORA_RST, 1));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(sci_io->ioexp, IOEXP_PORT0_LORA_RST, 1));
 
     // Check the BUSY status now - it does take some time to be ready
     uint32_t pin_state = 0XFFFFFFFF; // Assume busy
@@ -624,7 +606,7 @@ void sx1262_sensecap_init(spi_device_handle_t spi, esp_io_expander_handle_t io_e
     {
         usleep(1);
         printf(".");
-        ESP_ERROR_CHECK(esp_io_expander_get_level(io_exp, IOEXP_PORT0_LORA_BUSY, &pin_state));
+        ESP_ERROR_CHECK(esp_io_expander_get_level(sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, &pin_state));
     }
     printf(" Done\n");
 
@@ -633,66 +615,75 @@ void sx1262_sensecap_init(spi_device_handle_t spi, esp_io_expander_handle_t io_e
      * (Section 14.2 & 14.3 in datasheet)
      ************************************/
     // 0x80: SetStandby - Go to STDBY_RC for configuration
-    setStandby(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, STDBY_RC);
-    getStatus(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
+    setStandby(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, STDBY_RC);
+    getStatus(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
 
     // 0x07: ClearDeviceErrors, used to wipe clean issues caused by TCXO not being ready on cold start
-    clearDeviceErrors(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
+    clearDeviceErrors(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
 
     // 0x02: Clear any IRQ flags from setup
-    clearIRQStatus(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
+    clearIRQStatus(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
 
     // 0x8A: SetPacketType is the mode 0=GFSK, 1=LoRa. Has to be the FIRST configuration command.
-    setPacketType(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, PACKET_TYPE_GFSK);
+    setPacketType(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, PACKET_TYPE_GFSK);
 
     // 0x86: SetRfFrequency, used to set the frequency
-    setRfFrequency(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, LORA_RFFREQ);
+    setRfFrequency(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, LORA_RFFREQ);
 
     // 0x95: (TX) SetPaConfig configure the power amplifier (See datasheet)
-    setPaConfig(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, PA_SX1262_22DBM);
+    setPaConfig(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, PA_SX1262_22DBM);
     
     // 0x8E: (TX) SetTxParams to set the power at 22dB at 40us ramp up
-    setTxParams(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 22, SET_RAMP_40U);
+    setTxParams(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 22, SET_RAMP_40U);
 
     // 0x8F: SetBufferBaseAddress for pointer locations in FIFO for Tx and Rx
-    setBufferBaseAddress(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x00, 0x00);
+    setBufferBaseAddress(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x00, 0x00);
 
     // 0x8B: SetModulationParams to set the bitrate, bandwidth, shaping and frequency deviation.
     // Note: Must be executed some time after SetPacketType() but at some time before SetPacketParams()
-    setModulationParams(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, LORA_BITRATE, PULSESHAPE_BT_1_0, RX_BW_11700, LORA_FREQDEV);
+    setModulationParams(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, LORA_BITRATE, PULSESHAPE_BT_1_0, RX_BW_11700, LORA_FREQDEV);
 
     // 0x8C: SetPacketParams, set all the options for the packets incoming / outgoing. 
     // Note: Must be executed at some point after SetPacketParams(), not before
-    setPacketParams(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, PREAMBLE_TX_BITS, PREAMBLE_RX_BITS, sizeof(syncword) * 8, ADDRESS_FILTER_NODE_BROADCAST, LENGTH_VARIABLE, MAX_PACKET_SIZE, CRC_2_BYTE, WHITENING_OFF);
+    setPacketParams(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, PREAMBLE_TX_BITS, PREAMBLE_RX_BITS, sizeof(syncword) * 8, ADDRESS_FILTER_NODE_BROADCAST, LENGTH_VARIABLE, MAX_PACKET_SIZE, CRC_2_BYTE, WHITENING_OFF);
 
      // 0x0D: WriteRegister for CRC, SyncWord, Node/Broadcast Address and RX gain
-    writeRegister(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x06BC, sizeof(crcdata), crcdata);
-    writeRegister(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x06C0, sizeof(syncword), syncword);
-    writeRegister(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x06CD, sizeof(filter), filter);
-    writeRegister(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x08AC, sizeof(rxgain), rxgain);
+    writeRegister(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x06BC, sizeof(crcdata), crcdata);
+    writeRegister(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x06C0, sizeof(syncword), syncword);
+    writeRegister(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x06CD, sizeof(filter), filter);
+    writeRegister(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x08AC, sizeof(rxgain), rxgain);
 
     // 0x1D: (TX) ReadRegister: Look at Over-Current Protection (OCP) to see if it has changed for SX1262
     uint8_t ocpvalue;
-    readRegister(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x08E7, sizeof(ocpvalue), &ocpvalue);
+    readRegister(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x08E7, sizeof(ocpvalue), &ocpvalue);
     printf("Register: [0x08E7: OCP Configuration]: 0x%x (%0.f mA)\n\n", ocpvalue, ocpvalue * 2.5);
 
     // 0x08: SetDioIrqParams for Timeouts, CRC Errors and RXDone/TXDone for IRQ, with just CRC Error | RXDONE for DIO1, but not DIO2 or DIO3
-    setDioIrqParams(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, IRQ_TIMEOUT | IRQ_CRCERR | IRQ_RXDONE | IRQ_TXDONE, IRQ_CRCERR | IRQ_RXDONE, 0, 0);
+    setDioIrqParams(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, IRQ_TIMEOUT | IRQ_CRCERR | IRQ_RXDONE | IRQ_TXDONE, IRQ_CRCERR | IRQ_RXDONE, 0, 0);
 
     /************************************
      * Seeed Studio Wio-SX1262 settings
      ************************************/
     // 0x9D: SetDIO2AsRfSwitchCtrl as true means DIO2 controls the RF switch for TX, RX, etc
-    setDio2AsRfSwitchCtrl(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
+    setDio2AsRfSwitchCtrl(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
 
     // 0x97: SetDIO3AsTCXOCtrl controls the TCXO. Set to @ 2.4V (0x06) for SenseCap Indicator, 5ms (320 ticks) delay
-    setDio3AsTCXOCtrl(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, TCXOVOLTAGE_2_4V, 320);
+    setDio3AsTCXOCtrl(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, TCXOVOLTAGE_2_4V, 320);
+}
+
+void sx1262_rx(sensecap_io_handle_t sci_io) {
+    // 0x02: Clear any IRQ flags
+    clearIRQStatus(sci_io.spi, sci_io.ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
+
+    // 0x82: SetRx in continuous mode (0xFFFFFF)
+    setRx(sci_io.spi, sci_io.ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0xFFFFFF);
+    getStatus(sci_io.spi, sci_io.ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
 }
 
 /**
  * @brief Transmit requisite radio data on a button press
  */
-static void ui_button_event_task(void *pvParameters) {
+static void ecodan_tx_event_task(void *pvParameters) {
 
     sensecap_io_handle_t *sensecap_io = (sensecap_io_handle_t *) pvParameters;
     uint32_t buttonContext;
@@ -797,23 +788,23 @@ static void ui_button_event_task(void *pvParameters) {
             printf("\n");
 
             // 0x0E: (TX) WriteBuffer at 0x00 with entire frame
-            writeBuffer(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x00, sizeof(action_frame), (uint8_t *)&action_frame);
+            writeBuffer(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x00, sizeof(action_frame), (uint8_t *)&action_frame);
 
             // 0x02: Clear any IRQ flags
-            clearIRQStatus(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
+            clearIRQStatus(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
 
             // 0x83: SetTx to send one packet and stop (0x000000)
-            setTx(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x0FFFFF);
-            getStatus(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
+            setTx(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0x0FFFFF);
+            getStatus(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
 
             // Wait until Tx mode is exited
-            while ((getStatus(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, false) & 0x70) == STATUS_TX) {
+            while ((getStatus(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, false) & 0x70) == STATUS_TX) {
                 vTaskDelay(10 / portTICK_PERIOD_MS);
             }
-            getStatus(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
+            getStatus(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
 
             // 0x12: Get the IRQ status to see if either Timeout (0x0200) or TXDone (0x0001) 
-            uint16_t irqstatus = getIRQStatus(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
+            uint16_t irqstatus = getIRQStatus(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
             if (irqstatus & IRQ_TXDONE) {
                 printf("Tx Done\n");
             } else {
@@ -821,47 +812,108 @@ static void ui_button_event_task(void *pvParameters) {
             }
 
             // 0x02: Clear any IRQ flags
-            clearIRQStatus(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
+            clearIRQStatus(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
 
             // 0x82: SetRx in continuous mode (0xFFFFFF)
-            setRx(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0xFFFFFF);
-            getStatus(*(sensecap_io->spi), *(sensecap_io->io_exp), IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
+            setRx(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0xFFFFFF);
+            getStatus(sensecap_io->spi, sensecap_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
         }
     }
 }
 
-void app_main(void)
-{
-    vTaskDelay(10000 / portTICK_PERIOD_MS);
-
-    // IO Expander
-    esp_io_expander_handle_t io_exp = NULL;
-    spi_device_handle_t spi;
-    
-    /************************************
-     * WiFi SETUP
-     ************************************/
-    // NVS flash is used when using wifi_init_sta()
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-      ESP_ERROR_CHECK(nvs_flash_erase());
-      ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    // Initialise WiFi
-    wifi_init_sta();
-
-    // Set up NTP
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
-    esp_netif_sntp_init(&config);
-    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(30000)) != ESP_OK) {
-        printf("No SNTP within 30 secs\n");
+uint8_t ecodan_validate (ecodan_frame_t frame) {   
+    // Check to see if frame CRC is bad
+    if (frame.pkt.msg_crc != crc8((uint8_t *)&frame.pkt.msg, sizeof(frame.pkt.msg))) {
+        return 0;
     }
 
-    /************************************
-     * UART SETUP
-     ************************************/
+    // Print the frame for discovery needs
+    for (int x=0; x < MAX_PACKET_SIZE; x++) {
+        printf("%02x ", ((uint8_t *)&frame)[x]);
+    }
+    printf("\n");
+
+    // Check to see if the frame is in scope
+    if (((frame.id_msb == ECODAN_FTC_ID_MSB) && (frame.id_lsb == ECODAN_FTC_ID_LSB)) ||
+        ((frame.id_msb == ECODAN_RC_ID_MSB) && (frame.id_lsb == ECODAN_RC_ID_LSB))) {
+        return 1;
+    }
+
+    return 0;
+}
+
+void ecodan_process(ecodan_frame_t frame) {
+    char buf[6];
+    switch (frame.pkt.msg.type)
+    {
+    case 0x43:
+        // Record the Ambient Temp for TX usage
+        ecodan_amb_temp = frame.pkt.msg.data[1];
+        // Update the LVGL Ambient Temp label
+        lv_snprintf(buf, sizeof(buf), "%d.%d", (frame.pkt.msg.data[1] - 128) / 2, (frame.pkt.msg.data[1] % 2) * 5);
+        lv_subject_copy_string(&ui_ed_temp_amb_subj, buf);
+        break;
+    /**
+     * Ecodan FTC Reporting Set Temperature and Functional State
+     * 63 04 03 10 -- Standard reporting in
+     * 00 - Standard reporting in
+     * 01 - on?
+     * 02 - state
+     * a6 - set temp
+     * 02 - 0) normal 1) other 2) comp. curve
+     * 00
+     * 01 - Holiday mode
+     * 05 - ? - seen 0x04 elsewhere
+     * 03 - Holiday length
+     * 06 - ? - Zone / RC Control ?
+     * 06 - Zone / RC Control ?
+     * ff - ? - seen 0xfd elsewhere
+     * 00 
+     * bd 
+     * 00 
+     * 00
+     */ 
+    case 0x63:
+        // Record the Set Temp for TX usage
+        ecodan_set_temp = frame.pkt.msg.data[3];
+        // Update the LVGL Set Temp label
+        lv_snprintf(buf, sizeof(buf), "%d.%d", (frame.pkt.msg.data[3] - 128) / 2, (frame.pkt.msg.data[3] % 2) * 5);
+        lv_subject_copy_string(&ui_ed_temp_set_subj, buf);
+        // State reporting of heating
+        switch (frame.pkt.msg.data[2])
+        {
+        case 0x01: // Hot water?
+            lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEE\x80\x86");
+            lv_subject_copy_string(&ui_ed_state_desc_subj, "Hot Water");
+            break;
+        
+        case 0x02: // Heating
+            lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEE\x81\x80");
+            lv_subject_copy_string(&ui_ed_state_desc_subj, "Heating");
+            break;
+
+        case 0x05: // Ice protect
+            lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEF\x8B\x9C");
+            lv_subject_copy_string(&ui_ed_state_desc_subj, "Anti-Ice");
+            break;
+
+        case 0x06: // Ice protect
+            lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEF\x8B\x9C");
+            lv_subject_copy_string(&ui_ed_state_desc_subj, "Legionella");
+            break;
+
+        default: // Idle
+            lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEF\x8A\x8B");
+            lv_subject_copy_string(&ui_ed_state_desc_subj, "Idle");
+            break;
+        }
+        break;  
+    default:
+        break;
+    }
+}
+
+void uart_init(void) {
     uart_config_t uart_config = {
         .baud_rate = 115200,
         .data_bits = UART_DATA_8_BITS,
@@ -873,94 +925,83 @@ void app_main(void)
     ESP_ERROR_CHECK(uart_driver_install(UART_NUM_2, 1024, 0, 0, NULL, 0));
     ESP_ERROR_CHECK(uart_param_config(UART_NUM_2, &uart_config));
     uart_set_pin(UART_NUM_2, UART_TX, UART_RX, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+}
 
-    /************************************
-     * I2C BUS SETUP
-     ************************************/
-    i2c_master_bus_handle_t i2c_handle = NULL;
+void ecodan_rx_queue_task(void *pvParameters) {
+    // Data structure for a received transmission
+    ecodan_frame_t frame;
+    
+    for (;;) {
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+        if (queueLength > 0) {
+            // Collect data off the queue
+            xQueueReceive(queueMsg, (uint8_t *)&frame, portMAX_DELAY);
+            // Decrement the counter
+            queueLength--;
+            // Validate and process any received frames
+            if (ecodan_validate(frame)) {
+                ecodan_process(frame);
+            } 
+        }
+    }
+}
+
+void rp2040_buffer_task(void *pvParameters) {
+    uint8_t uart_buf[34];
+    int uart_len;
+    
+    for (;;) {
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+        ESP_ERROR_CHECK_WITHOUT_ABORT(uart_get_buffered_data_len(UART_NUM_2, (size_t*)&uart_len));
+        if (uart_len == 34) {
+            // Read in the UART bytes
+            uart_read_bytes(UART_NUM_2, uart_buf, uart_len, 100 / portTICK_PERIOD_MS);
+            ui_update_sensors(uart_buf);
+        } else if (uart_len > 34) {
+            // Flush out any UART noise
+            uart_flush(UART_NUM_2);
+        }
+    }
+}
+
+void i2c_init(sensecap_io_handle_t *sci_io) {
     const i2c_master_bus_config_t i2c_bus_config = {
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .i2c_port = I2C_NUM_0,
         .scl_io_num = I2C_SCL,
         .sda_io_num = I2C_SDA,
     };
-    i2c_new_master_bus(&i2c_bus_config, &i2c_handle);
+    i2c_new_master_bus(&i2c_bus_config, &sci_io->i2c);
+}
 
+void wifi_init(void) {
     /************************************
-     * IO Expander Setup
+     * WiFi Setup
      ************************************/
+    // NVS flash is used when using wifi_init_sta()
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    // Initialise WiFi
+    wifi_init_sta();
+}
+
+void ioexp_init(sensecap_io_handle_t *sci_io) {
     // Initialise the IO Expander
-    ESP_ERROR_CHECK(esp_io_expander_new_i2c_tca95xx_16bit(i2c_handle, I2C_ADDR_IOEXP, &io_exp));
+    ESP_ERROR_CHECK(esp_io_expander_new_i2c_tca95xx_16bit(sci_io->i2c, I2C_ADDR_IOEXP, &sci_io->ioexp));
 
     // Turn on the LoRa, LCD, Touch
-    ESP_ERROR_CHECK(esp_io_expander_set_dir(io_exp, IOEXP_PORT0_LORA_NSS | IOEXP_PORT0_LORA_RST | IOEXP_PORT0_LCD_RST | IOEXP_PORT0_TOUCH_RST | IOEXP_PORT1_RP2040_RST |  IOEXP_PORT1_BMP_PWR | IOEXP_PORT0_TOUCH_IRQ, IO_EXPANDER_OUTPUT));
-    ESP_ERROR_CHECK(esp_io_expander_set_level(io_exp, IOEXP_PORT0_LORA_NSS | IOEXP_PORT0_LORA_RST | IOEXP_PORT0_LCD_RST | IOEXP_PORT0_TOUCH_RST | IOEXP_PORT1_RP2040_RST | IOEXP_PORT1_BMP_PWR, 1));
+    ESP_ERROR_CHECK(esp_io_expander_set_dir(sci_io->ioexp, IOEXP_PORT0_LORA_NSS | IOEXP_PORT0_LORA_RST | IOEXP_PORT0_LCD_RST | IOEXP_PORT0_TOUCH_RST | IOEXP_PORT1_RP2040_RST |  IOEXP_PORT1_BMP_PWR | IOEXP_PORT0_TOUCH_IRQ, IO_EXPANDER_OUTPUT));
+    ESP_ERROR_CHECK(esp_io_expander_set_level(sci_io->ioexp, IOEXP_PORT0_LORA_NSS | IOEXP_PORT0_LORA_RST | IOEXP_PORT0_LCD_RST | IOEXP_PORT0_TOUCH_RST | IOEXP_PORT1_RP2040_RST | IOEXP_PORT1_BMP_PWR, 1));
 
     // LoRa - SPI BUSY Indicator
-    ESP_ERROR_CHECK(esp_io_expander_set_dir(io_exp, IOEXP_PORT0_LORA_BUSY | IOEXP_PORT0_LORA_DIO1 | IOEXP_PORT1_LORA_TXCO, IO_EXPANDER_INPUT));
+    ESP_ERROR_CHECK(esp_io_expander_set_dir(sci_io->ioexp, IOEXP_PORT0_LORA_BUSY | IOEXP_PORT0_LORA_DIO1 | IOEXP_PORT1_LORA_TXCO, IO_EXPANDER_INPUT));
 
-    /************************************
-     * LCD Setup (Panel + Touch)
-     ************************************/
-
-    // Initialise the panel, touch and lvgl
-    lcd_display_init(i2c_handle, io_exp);
-
-    // Turn on the backlight
-    lcd_backlight_init(LCD_BACKLIGHT);
-
-    /************************************
-     * SPI SETUP POST LCD 
-     ************************************/
-    // Main SPI bus setup
-    spi_bus_config_t spi_bus_cfg = {
-        .miso_io_num = SPI_MISO,
-        .mosi_io_num = SPI_MOSI,
-        .sclk_io_num = SPI_SCK,
-        .quadwp_io_num = -1,
-        .quadhd_io_num = -1,
-        .max_transfer_sz = 64
-    };
-
-    // Configure a generic SPI device
-    spi_device_interface_config_t sx1262_cfg = {
-        .mode = 0,
-        .clock_speed_hz = SPI_MASTER_FREQ_11M,  // Can't use 16MHz - causes SPI issues regardless of DMA setting
-        .spics_io_num = -1,                     // NSS / CS line -- TODO EXPANDER
-        .queue_size = 1,                        // Mandatory to have queue size
-        .command_bits = 8,                      // All commands are 8 bits in length
-        .address_bits = 0,                      // Only used for read / write operations on registers and buffers
-        .dummy_bits = 0,                        // Only used on write
-        .flags = SPI_DEVICE_HALFDUPLEX          // The radio needs half-duplex for dummy bits and NOPs
-    };
-
-    // Start up the SPI bus
-    ESP_ERROR_CHECK(spi_bus_initialize(SPI_HOST_ID, &spi_bus_cfg, SPI_DMA_CH_AUTO));
-
-    // Attach the SX1262 to the SPI bus
-    ESP_ERROR_CHECK(spi_bus_add_device(SPI_HOST_ID, &sx1262_cfg, &spi));
-
-    /************************************
-     * LVGL UI
-     ************************************/
-    // Set up the LVGL-based UI with a lock
-    _lock_acquire(&lvgl_ui_lock);
-    ui_main();
-    _lock_release(&lvgl_ui_lock);
-    
-    // Start the UI clock
-    start_clock();
-
-    /************************************
-     * SX1262 Init
-     ************************************/
-    // Hardware Specific Init (SenseCAP TCXO runs differently)
-    sx1262_sensecap_init(spi, io_exp);
-
-    /************************************
-     * IO Expander ISR Setup
-     ************************************/
-    // Interrupt Service Routine (ISR) setup for DIO1
+    // GPIO setup for mapping IOEXP_PORT0_LORA_DIO1 to IOEXP_IRQ
     gpio_config_t io_conf = {
         .pin_bit_mask = (1ULL << IOEXP_IRQ), // Interrupt from IO Expander
         .intr_type = GPIO_INTR_NEGEDGE, // Negative Edge, as IO Expander IRQ is pulled up / open-drain
@@ -969,181 +1010,95 @@ void app_main(void)
         .pull_up_en = 1 // Pull up
     };
     ESP_ERROR_CHECK(gpio_config(&io_conf));
+}
 
+void spi_init(void) {
+    // Main SPI bus setup now LCD work is complete
+    spi_bus_config_t spi_bus_cfg = {
+        .miso_io_num = SPI_MISO,
+        .mosi_io_num = SPI_MOSI,
+        .sclk_io_num = SPI_SCK,
+        .quadwp_io_num = -1,
+        .quadhd_io_num = -1,
+        .max_transfer_sz = 64,
+    };
+    ESP_ERROR_CHECK(spi_bus_initialize(SPI_HOST_ID, &spi_bus_cfg, SPI_DMA_CH_AUTO));
+}
+
+void ntp_init(void) {
+    // Set up SNTP
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    esp_netif_sntp_init(&config);
+    if (esp_netif_sntp_sync_wait(pdMS_TO_TICKS(30000)) != ESP_OK) {
+        printf("No SNTP within 30 secs\n");
+    }
+}
+
+void app_main(void)
+{
+    vTaskDelay(10000 / portTICK_PERIOD_MS);
+
+    // UART - Comms to RP2040
+    uart_init();
+    // I2C Bus - IO Expander + Touch Screen
+    i2c_init(&sensecap_io);
+    // IO Expander - LCD, Touch, SX1262, RP2040
+    ioexp_init(&sensecap_io);
+    // LCD Display - has to be done before any other SPI device
+    lcd_display_init(&sensecap_io);
+    lcd_backlight_init(LCD_BACKLIGHT);
+
+    // Create clean SPI for SX1262 
+    spi_init();
+    // SX1262 - Has specific needs: IO Expander GPIO, TXCO settings
+    sx1262_sensecap_init(&sensecap_io);
+    // SX1262 - RX message queue
+    queueMsg = xQueueCreate(10, MAX_PACKET_SIZE);
+
+    // Wireless
+    wifi_init();
+    // NTP for UI clock
+    ntp_init();
+ 
+    // UI Initialisation
+    _lock_acquire(&lvgl_ui_lock);
+    ui_main();
+    _lock_release(&lvgl_ui_lock);
+
+    /************************************
+     * Task Setup (RX (ISR) + TX (UI)
+     ************************************/
+    // Handling RX event interrupts via  IO Expander
+    xTaskCreate(io_expander_isr_task, "IO Exp INT Task", 2048, &sensecap_io, 1, &ioExpanderInterruptTaskHandle);
+
+    // Handling RX queue of data
+    xTaskCreate(ecodan_rx_queue_task, "ED RX Queue Task", 2048, NULL, 1, &edRxTaskHandle);
+
+    // Handling TX event callbacks via UI
+    xTaskCreate(ecodan_tx_event_task, "ED TX Event Task", 2048, &sensecap_io, 1, &uiButtonTaskHandle);
+
+    // UART events that impact display
+    xTaskCreate(rp2040_buffer_task, "UART Buffer Task", 2048, NULL, 1, &rp2040TaskHandle);
+
+    /************************************
+     * IO Expander ISR Setup
+     ************************************/
     // Set up interrupt service
     ESP_ERROR_CHECK(gpio_install_isr_service(0));
-
-    // Data structure for the IO Expander Handler - send both the IO Expander and SPI
-    sensecap_io_handle_t irq_io = {
-        .spi = &spi,
-        .io_exp = &io_exp
-    };
-    // IO Expander Handler Task for ISR handler to offload work to in a non-ISR / thread-safe way
-    xTaskCreate(io_expander_isr_task, "IO Expander Handler Task", 2048, &irq_io, 1, &ioExpanderInterruptTaskHandle);
 
     // ISR Handler for all IO Expander Interrupts
     ESP_ERROR_CHECK(gpio_isr_handler_add(IOEXP_IRQ, io_expander_isr_handler, NULL));
 
     /************************************
-     * SX1262 Rx Mode
+     * SX1262 Rx Mode - Default
      ************************************/
-    // Create the SX1262 message queue
-    queueMsg = xQueueCreate(10, MAX_PACKET_SIZE);
-    
-    // 0x02: Clear any IRQ flags
-    clearIRQStatus(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS);
-
-    // 0x82: SetRx in continuous mode (0xFFFFFF)
-    setRx(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, 0xFFFFFF);
-    getStatus(spi, io_exp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, true);
-
-    // This is to send messages
-    xTaskCreate(ui_button_event_task, "UI Button Task Handler", 2048, &irq_io, 1, &uiButtonTaskHandle);
+    sx1262_rx(sensecap_io);
    
     /************************************
      * MAIN LOOP
      ************************************/
-    // Data buffer for RP2040 messages
-    uint8_t uart_buf[34];
-    int uart_len;
     while(1) {
         // Wait, so the watchdog doesn't kick in
         vTaskDelay(10 / portTICK_PERIOD_MS);
-
-        // If we have something on the queue
-        while (queueLength > 0) {
-            // Data structure for a received transmission
-            ecodan_frame_t frame;
-
-            // Collect data off the queue
-            xQueueReceive(queueMsg, (uint8_t *)&frame, portMAX_DELAY);
-
-            // Decrement the counter
-            queueLength--;
-
-            // Do something, such as print the payload and calculate the internal CRC
-            for (int x=0; x < MAX_PACKET_SIZE; x++) {
-                printf("%02x ", ((uint8_t *)&frame)[x]);
-            }
-
-            // Just some verbosity to show if we have a passing CRC
-            if (frame.pkt.msg_crc == crc8((uint8_t *)&frame.pkt.msg, sizeof(frame.pkt.msg))) {
-                printf("CRC Pass\n");
-            } else {
-                printf("CRC Fail\n");
-            }
-
-            // Ecodan RC Reporting Ambient Temperature
-            if ((frame.id_msb == ECODAN_RC_ID_MSB) && (frame.id_lsb == ECODAN_RC_ID_LSB) && (frame.pkt.msg.type == 0x43)) {
-                char buf[6];
-                // Record the Ambient Temp for TX usage
-                ecodan_amb_temp = frame.pkt.msg.data[1];
-                // Update the LVGL Ambient Temp label
-                lv_snprintf(buf, sizeof(buf), "%d.%d", (frame.pkt.msg.data[1] - 128) / 2, (frame.pkt.msg.data[1] % 2) * 5);
-                lv_subject_copy_string(&ui_ed_temp_amb_subj, buf);
-            }
-            /**
-             * Ecodan FTC Reporting Set Temperature and Functional State
-             * 63 04 03 10 -- Standard reporting in
-             * 00 - Standard reporting in
-             * 01 - 
-             * 02 - 
-             * a6 - set temp
-             * 02 
-             * 00
-             * 01 - Holiday mode
-             * 05 
-             * 03 - Holiday length
-             * 06 
-             * 06 
-             * ff 
-             * 00 
-             * bd 
-             * 00 
-             * 00
-             */ 
-            if ((frame.id_msb == ECODAN_FTC_ID_MSB) && (frame.id_lsb == ECODAN_FTC_ID_LSB) && (frame.pkt.msg.type == 0x63)) {
-                char buf[6];
-                // Record the Set Temp for TX usage
-                ecodan_set_temp = frame.pkt.msg.data[3];
-                // Update the LVGL Set Temp label
-                lv_snprintf(buf, sizeof(buf), "%d.%d", (frame.pkt.msg.data[3] - 128) / 2, (frame.pkt.msg.data[3] % 2) * 5);
-                lv_subject_copy_string(&ui_ed_temp_set_subj, buf);
-                // State reporting of heating
-                switch (frame.pkt.msg.data[2])
-                {
-                case 0x01: // Hot water?
-                    lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEE\x80\x86");
-                    lv_subject_copy_string(&ui_ed_state_desc_subj, "Hot Water");
-                    break;
-                
-                case 0x02: // Heating
-                    lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEE\x81\x80");
-                    lv_subject_copy_string(&ui_ed_state_desc_subj, "Heating");
-                    break;
-
-                case 0x05: // Ice protect
-                    lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEF\x8B\x9C");
-                    lv_subject_copy_string(&ui_ed_state_desc_subj, "Anti-Ice");
-                    break;
-
-                case 0x06: // Ice protect
-                    lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEF\x8B\x9C");
-                    lv_subject_copy_string(&ui_ed_state_desc_subj, "Legionella");
-                    break;
-
-                default: // Idle
-                    lv_subject_copy_string(&ui_ed_state_icon_subj, "\xEF\x8A\x8B");
-                    lv_subject_copy_string(&ui_ed_state_desc_subj, "Idle");
-                    break;
-                }
-            } 
-        }
-
-        // Should get 34 byte message from RP2040 
-        ESP_ERROR_CHECK_WITHOUT_ABORT(uart_get_buffered_data_len(UART_NUM_2, (size_t*)&uart_len));
-        if (uart_len == 34) {
-            // Read in the UART bytes
-            uart_read_bytes(UART_NUM_2, uart_buf, uart_len, 100 / portTICK_PERIOD_MS);
-        
-            // Update UI Temp
-            uint16_t raw_temp = strtoul((char *)uart_buf+7, NULL, 16);
-            float temp = -45.0 + 175.0 * (raw_temp / 65535.0);
-            char temp_text[6];
-            lv_snprintf(temp_text, sizeof(temp_text), "%d.%d", (int)temp, ((int)(temp * 10) % 10));
-            lv_subject_copy_string(&ui_sensor_temp_subj, temp_text);
-
-            // Update UI Relative Humidity
-            uint16_t raw_relh = strtoul((char *)uart_buf, NULL, 16);
-            float human_relh = raw_relh / 65535.0 * 100.0;
-            lv_subject_set_int(&ui_sensor_rh_subj, (int32_t)human_relh);
-
-            // Update UI CO2
-            uint16_t raw_co2 = strtoul((char *)uart_buf+14, NULL, 16);
-            lv_subject_set_int(&ui_sensor_co2_subj, (int32_t)raw_co2);
-
-            // Update UI VOC
-            int32_t raw_voc = strtoll((char *)uart_buf+27, NULL, 16);
-            lv_subject_set_int(&ui_sensor_voc_subj, raw_voc);
-
-            // Get the time, to use to store datapoint into storage
-            struct timeval tv;
-            gettimeofday(&tv, NULL);
-            int pos = ((tv.tv_sec % 86400) / 300);
-
-            // Now store those datapoints with light converstion
-            datapoints_co2[pos] = raw_co2;
-            datapoints_voc[pos] = raw_voc;
-            // Multiply humidity by 10x to retain .1f precision
-            datapoints_humid[pos] = raw_relh / 65.535;
-            // Multiply temperature by 10x to retain .1f precision
-            datapoints_temp[pos] = -450 + 1750 * (raw_temp / 65535.0);
-
-            // Print out for the ESP32 console
-            printf("UART Receive: %.0f,%.1f,%d,%ld\n", human_relh, temp, raw_co2, raw_voc);
-        } else if (uart_len > 34) {
-            // Flush out any UART noise
-            uart_flush(UART_NUM_2);
-        }
     }
 }

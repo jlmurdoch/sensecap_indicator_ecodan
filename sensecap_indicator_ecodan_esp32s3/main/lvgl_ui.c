@@ -96,6 +96,76 @@ chart_metadata_t chart_meta[] = {
     }
 };
 
+/**
+ * @brief Update the clock in the UI
+ */
+void ui_update_clock(void *arg) {
+    time_t now;
+    char buf[6]; 
+    struct tm timeinfo;
+
+    time(&now);
+    setenv("TZ", "BST", 1);
+    tzset();
+
+    localtime_r(&now, &timeinfo);
+    if (timeinfo.tm_sec == 0) {
+        strftime(buf, sizeof(buf), "%H:%M", &timeinfo);
+        lv_subject_copy_string(&ui_clock_subj, buf);
+    }
+}
+
+/**
+ * @brief Start the clock timer for the UI
+ */
+void ui_start_clock(void) {
+    esp_timer_handle_t periodic_timer;
+    // Callback setup for tick timer
+    const esp_timer_create_args_t periodic_timer_args = {
+        .callback = &ui_update_clock,
+        .name = "timer_clock"
+    };
+    // Instantiate the tick timer
+    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
+    // Trigger tick increment every 1000us / 1ms
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000000));
+}
+
+void ui_update_sensors(uint8_t buf[34]) {
+    // Get the time, to use to store datapoint into storage
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    int pos = ((tv.tv_sec % 86400) / 300);
+
+    // Update UI Temp
+    uint16_t raw_temp = strtoul((char *)buf+7, NULL, 16);
+    float temp = -45.0 + 175.0 * (raw_temp / 65535.0);
+    char temp_text[6];
+    lv_snprintf(temp_text, sizeof(temp_text), "%d.%d", (int)temp, ((int)(temp * 10) % 10));
+    lv_subject_copy_string(&ui_sensor_temp_subj, temp_text);
+
+    // Update UI Relative Humidity
+    uint16_t raw_relh = strtoul((char *)buf, NULL, 16);
+    float human_relh = raw_relh / 65535.0 * 100.0;
+    lv_subject_set_int(&ui_sensor_rh_subj, (int32_t)human_relh);
+
+    // Update UI CO2
+    uint16_t raw_co2 = strtoul((char *)buf+14, NULL, 16);
+    lv_subject_set_int(&ui_sensor_co2_subj, (int32_t)raw_co2);
+
+    // Update UI VOC
+    int32_t raw_voc = strtoll((char *)buf+27, NULL, 16);
+    lv_subject_set_int(&ui_sensor_voc_subj, raw_voc);
+
+    // Now store those datapoints with light conversion
+    datapoints_co2[pos] = raw_co2;
+    datapoints_voc[pos] = raw_voc;
+    // Multiply humidity by 10x to retain .1f precision
+    datapoints_humid[pos] = raw_relh / 65.535;
+    // Multiply temperature by 10x to retain .1f precision
+    datapoints_temp[pos] = -450 + 1750 * (raw_temp / 65535.0);
+}
+
 void ui_button_event_callback(lv_event_t *event) {
     ui_button_event_user_data_t *user_data = lv_event_get_user_data(event);
 
@@ -186,6 +256,9 @@ void ui_chart_event_callback(lv_event_t *event) {
 }
 
 void ui_main(void) {  
+    // Start the UI clock
+    ui_start_clock();
+
     // Style for top bar
     static lv_style_t style_statusbar;
     lv_style_init(&style_statusbar);
@@ -361,7 +434,7 @@ void ui_main(void) {
     lv_obj_set_user_data(obj, &ui_button_tempdown_data);
     lv_obj_add_event_cb(obj, ui_button_event_callback, LV_EVENT_CLICKED, &ui_button_tempdown_data);
 
-    // Hotwater On
+    // Hot Water On
     obj = lv_button_create(cont);
     lv_obj_set_size(obj, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
     lv_obj_set_grid_cell(obj, LV_GRID_ALIGN_STRETCH, 1, 1,
