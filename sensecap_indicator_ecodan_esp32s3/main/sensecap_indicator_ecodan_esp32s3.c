@@ -15,6 +15,8 @@ TaskHandle_t uiButtonTaskHandle = NULL;
 TaskHandle_t edRxTaskHandle = NULL;
 TaskHandle_t rp2040TaskHandle = NULL;
 
+_lock_t lvgl_ui_lock;
+
 // WiFi Retry counter
 static int s_wifi_retry_num = 0;
 
@@ -56,6 +58,9 @@ void io_expander_isr_task(void *pvParameters) {
 
     // Run forever
     for (;;) {
+        // Delay for high-priority 
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+        
         // Pick up notifies from io_expander_isr_handler()
         messagesToProcess = ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
@@ -84,7 +89,9 @@ void io_expander_isr_task(void *pvParameters) {
                         // Read it off the buffer into the space
                         readBuffer(sci_io->spi, sci_io->ioexp, IOEXP_PORT0_LORA_BUSY, IOEXP_PORT0_LORA_NSS, offset, length, data);
                         // Pop the data onto the queue
-                        xQueueSend(queueMsg, data, portMAX_DELAY);
+                        if(xQueueSend(queueMsg, data, 10) != pdPASS) {
+                            printf("Unable to send SX1262 buffer\n");
+                        }
                         // Increment the queue length
                         queueLength++;
                         // Free up the space used by the data
@@ -210,13 +217,15 @@ void wifi_init_sta(void)
  */
 static void lcd_panel_flush_callback(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
     esp_lcd_panel_handle_t panel_handle = lv_display_get_user_data(disp);
-    const int x1 = area->x1;
-    const int x2 = area->x2;
-    const int y1 = area->y1;
-    const int y2 = area->y2;
-
-    // Get driver to render pixel map
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, x1, y1, x2 + 1, y2 + 1, px_map));
+    int offsetx1 = area->x1;
+    int offsetx2 = area->x2;
+    int offsety1 = area->y1;
+    int offsety2 = area->y2;
+    // pass the draw buffer to the driver
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map));
+    if ((offsetx1 > offsetx2) || (offsety1 > offsety2)) {
+        printf("%3d > %3d, %3d > %3d\n", offsetx1, offsetx2 + 1, offsety1,  offsety2 + 1);
+    }
 }
 
 /**
@@ -264,16 +273,21 @@ static void lv_tick_task(void *arg) {
  */
 static void manage_lv_timer_handler_task(void *arg)
 {
-    uint32_t time_till_next_ms = 0;
+    uint32_t task_delay_ms = 0;
     while (1) {
         _lock_acquire(&lvgl_ui_lock);
-        time_till_next_ms = lv_timer_handler();
+        task_delay_ms = lv_timer_handler();
         _lock_release(&lvgl_ui_lock);
-        // Prevent crash on value being too short
-        time_till_next_ms = time_till_next_ms < (1000 / CONFIG_FREERTOS_HZ) ? (1000 / CONFIG_FREERTOS_HZ) : time_till_next_ms;
-        // Prevent watchdog timeout on vlaue being too big
-        time_till_next_ms = time_till_next_ms > 500 ? 500 : time_till_next_ms;
-        usleep(1000 * time_till_next_ms);
+
+        // Max time is 500ms
+        if (task_delay_ms > 500) {
+            task_delay_ms = 500;
+        // Min time is 1 or 10 depending on sdkconfig
+        } else if (task_delay_ms < (1000 / CONFIG_FREERTOS_HZ)) {
+            task_delay_ms = 1000 / CONFIG_FREERTOS_HZ;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(task_delay_ms));
     }
 }
 
@@ -387,7 +401,7 @@ void sensecap_indicator_lcd_drivers_init(sensecap_io_handle_t *sci_io) {
     // RGB Panel Properties (SCREEN_GX)
     esp_lcd_rgb_panel_config_t rgb_config = {
         .data_width = 16, // RGB565 Parallel, 5+6+5 = 16 bits
-        // .dma_burst_size = 64,
+        .dma_burst_size = 64,
         .num_fbs = 2,
         .clk_src = LCD_CLK_SRC_PLL240M,
         .disp_gpio_num = LCD_IO_RGB_DISP_EN,
@@ -465,7 +479,9 @@ static lv_disp_t *lcd_display_init(sensecap_io_handle_t *sci_io) {
     /**
      * 1. Initialise LVGL
      */
+    _lock_acquire(&lvgl_ui_lock);
     lv_init();
+    _lock_release(&lvgl_ui_lock);
 
     /**
      * 2. Initialise Panel & Touch Drivers
@@ -491,17 +507,18 @@ static lv_disp_t *lcd_display_init(sensecap_io_handle_t *sci_io) {
     /**
      * 4. Display Interface
      */
+    // Double framebuffers
+    void *fb1 = NULL;
+    void *fb2 = NULL;
+    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(sci_io->panel, 2, &fb1, &fb2));
+    
     // Create display with size
+    _lock_acquire(&lvgl_ui_lock);
     lv_display_t *display = lv_display_create(LCD_RES_H, LCD_RES_V);
-    assert(display);
 
     // Set display pixel format
     lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
 
-    // Set up a double frame buffer
-    void *fb1 = NULL;
-    void *fb2 = NULL;
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(sci_io->panel, 2, &fb1, &fb2));
     // Set buffers for display
     lv_display_set_buffers(display, fb1, fb2, LCD_RES_H * LCD_RES_V * lv_color_format_get_size(lv_display_get_color_format(display)), LV_DISPLAY_RENDER_MODE_DIRECT);
 
@@ -528,8 +545,8 @@ static lv_disp_t *lcd_display_init(sensecap_io_handle_t *sci_io) {
     /**
      * 6. Manage LVGL timers
      */
-    // Task to call the LVGL timer in a controlled, thread-safe fashion
-    xTaskCreate(manage_lv_timer_handler_task, "LVGL Timer Handler Task", 10480, NULL, 2, NULL);
+    // High priority (2) task to call the LVGL timer in a controlled, thread-safe fashion on core 0
+    xTaskCreatePinnedToCore(manage_lv_timer_handler_task, "LVGL Timer Handler Task", 10480, NULL, 2, NULL, PRO_CPU);
 
     /**
      * 7. Set a theme
@@ -538,6 +555,8 @@ static lv_disp_t *lcd_display_init(sensecap_io_handle_t *sci_io) {
                                             LV_THEME_DEFAULT_DARK, LV_FONT_DEFAULT);
 
     lv_display_set_theme(display, theme); /* Assign theme to display */
+
+    _lock_release(&lvgl_ui_lock);
 
     return display;
 }
@@ -690,6 +709,7 @@ static void ecodan_tx_event_task(void *pvParameters) {
 
     // Run forever
     for (;;) {
+        vTaskDelay(10 / portTICK_PERIOD_MS);
         // If we get a notify
         if (xTaskNotifyWait(0, ULONG_MAX, &buttonContext, 10) == pdPASS) {
             printf("Button %d: %d\n", (uint8_t)((buttonContext >> 8) & 0xFF),  (int8_t)buttonContext & 0xFF);
@@ -844,14 +864,17 @@ uint8_t ecodan_validate (ecodan_frame_t frame) {
 
 void ecodan_process(ecodan_frame_t frame) {
     char buf[6];
+    _lock_acquire(&lvgl_ui_lock);
     switch (frame.pkt.msg.type)
     {
     case 0x43:
         // Record the Ambient Temp for TX usage
         ecodan_amb_temp = frame.pkt.msg.data[1];
+        
         // Update the LVGL Ambient Temp label
         lv_snprintf(buf, sizeof(buf), "%d.%d", (frame.pkt.msg.data[1] - 128) / 2, (frame.pkt.msg.data[1] % 2) * 5);
         lv_subject_copy_string(&ui_ed_temp_amb_subj, buf);
+        
         break;
     /**
      * Ecodan FTC Reporting Set Temperature and Functional State
@@ -911,6 +934,7 @@ void ecodan_process(ecodan_frame_t frame) {
     default:
         break;
     }
+    _lock_release(&lvgl_ui_lock);
 }
 
 void uart_init(void) {
@@ -1066,19 +1090,24 @@ void app_main(void)
     _lock_release(&lvgl_ui_lock);
 
     /************************************
-     * Task Setup (RX (ISR) + TX (UI)
+     * Task Setup 
+     * Bind these to the second core
+     * - HIGH: Interrupts from IO Expander
+     * - HIGH: TX Events (button pushes)
+     * - LOW: RX Queue (from Ecodan)
+     * - LOW: UART Comms (from RP2040)
      ************************************/
-    // Handling RX event interrupts via  IO Expander
-    xTaskCreate(io_expander_isr_task, "IO Exp INT Task", 2048, &sensecap_io, 1, &ioExpanderInterruptTaskHandle);
-
-    // Handling RX queue of data
-    xTaskCreate(ecodan_rx_queue_task, "ED RX Queue Task", 2048, NULL, 1, &edRxTaskHandle);
+    // Handling RX event interrupts via IO Expander
+    xTaskCreatePinnedToCore(io_expander_isr_task, "IOExp Int Task", 2048, &sensecap_io, 2, &ioExpanderInterruptTaskHandle, APP_CPU);
 
     // Handling TX event callbacks via UI
-    xTaskCreate(ecodan_tx_event_task, "ED TX Event Task", 2048, &sensecap_io, 1, &uiButtonTaskHandle);
+    xTaskCreatePinnedToCore(ecodan_tx_event_task, "EDTX Event Task", 2048, &sensecap_io, 2, &uiButtonTaskHandle, APP_CPU);
+
+    // Handling RX queue of data
+    xTaskCreatePinnedToCore(ecodan_rx_queue_task, "EDRX Queue Task", 2048, NULL, tskIDLE_PRIORITY, &edRxTaskHandle, APP_CPU);
 
     // UART events that impact display
-    xTaskCreate(rp2040_buffer_task, "UART Buffer Task", 2048, NULL, 1, &rp2040TaskHandle);
+    xTaskCreatePinnedToCore(rp2040_buffer_task, "UART Comms Task", 3072, NULL, tskIDLE_PRIORITY, &rp2040TaskHandle, APP_CPU);
 
     /************************************
      * IO Expander ISR Setup
@@ -1093,12 +1122,4 @@ void app_main(void)
      * SX1262 Rx Mode - Default
      ************************************/
     sx1262_rx(sensecap_io);
-   
-    /************************************
-     * MAIN LOOP
-     ************************************/
-    while(1) {
-        // Wait, so the watchdog doesn't kick in
-        vTaskDelay(10 / portTICK_PERIOD_MS);
-    }
 }

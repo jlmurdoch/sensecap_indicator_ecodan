@@ -100,9 +100,9 @@ chart_metadata_t chart_meta[] = {
  * @brief Update the clock in the UI
  */
 void ui_update_clock(void *arg) {
-    time_t now;
+    time_t now = 0;
     char buf[6]; 
-    struct tm timeinfo;
+    struct tm timeinfo = { 0 };
 
     time(&now);
     setenv("TZ", "BST", 1);

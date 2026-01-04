@@ -8,6 +8,8 @@
 #include <stdio.h>
 // For usleep()
 #include "unistd.h"
+// For MAX & MIN
+#include <sys/param.h>
 
 // Delays, Tasks, etc
 #include <freertos/FreeRTOS.h> // Needed before task.h
@@ -57,6 +59,10 @@
 #include "sx1262.h" 
 // LVGL UI Design
 #include "lvgl_ui.h"
+
+// CPU core affinity
+#define PRO_CPU 0
+#define APP_CPU 1
 
 /**
  * GPIO
@@ -180,7 +186,7 @@ static const char *TAG = "SenseCAP";
  * LVGL Variables
  */
 // LVGL is not thread safe, so we need a lock
-static _lock_t lvgl_ui_lock;
+extern _lock_t lvgl_ui_lock;
 
 // FIFO circular buffer for datapoints
 extern int16_t datapoints_temp[CHART_FIFO_SIZE];

@@ -11,6 +11,8 @@
 
 #define CHART_FIFO_SIZE (86400 / 300)
 
+extern _lock_t lvgl_ui_lock;
+
 // Storage for button metadata in button callbacks
 typedef struct {
     uint8_t button;
