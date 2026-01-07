@@ -209,12 +209,19 @@ int main()
     gpio_set_dir(I2C0_PWR_PIN, GPIO_OUT);
     gpio_put(I2C0_PWR_PIN, true);
 
-    // Enable I2C Bus, pulling up SDA and SCL
+    // Enable I2C Bus on Grove B + Internal Sensors
     i2c_init(I2C_INST_DEFAULT, 100 * 1000);
     gpio_set_function(I2C0_SDA_PIN, GPIO_FUNC_I2C);
     gpio_set_function(I2C0_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(I2C0_SDA_PIN);
     gpio_pull_up(I2C0_SCL_PIN);
+
+    // Enable I2C Bus on Grove A + USB-C
+    i2c_init(i2c_default, 100 * 1000);
+    gpio_set_function(GROVE_A_I2C1_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(GROVE_A_I2C1_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(GROVE_A_I2C1_SDA_PIN);
+    gpio_pull_up(GROVE_A_I2C1_SCL_PIN);
 
     // External AHT20 humidity and temp
     uint32_t aht20_rh, aht20_temp = 0;
@@ -257,5 +264,14 @@ int main()
         char msg[36];
         sprintf(msg, "0x%04x,0x%04x,0x%04x,0x%08x+++", comp_rh, comp_temp, human_co2, voc_index);
         uart_puts(UART_INST_DEFAULT, msg);    
+
+        /*
+        // Placeholder for USB-C / Grove A I2C 
+        uint8_t rxdata;
+        uint8_t device = 0x77;
+        if (i2c_read_blocking(i2c_default, device, &rxdata, 1, false) >= 0) {
+            printf("Device found\n");
+        }
+        */
     }
 }

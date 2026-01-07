@@ -16,16 +16,16 @@
  * Looks to be enabled on USB-C pin A8 (Side Band Use)
  */
 // SPI
-#define SPI0_MISO_PIN 0
-#define SPI0_NSS_PIN 1
-#define SPI0_SCK_PIN  2
-#define SPI0_MOSI_PIN 3
+#define USBC_SPI0_MISO_PIN 0
+#define USBC_SPI0_NSS_PIN 1
+#define USBC_SPI0_SCK_PIN  2
+#define USBC_SPI0_MOSI_PIN 3
 // UART
-#define UART1_TX_PIN 8
-#define UART1_RX_PIN 9
+#define USBC_UART1_TX_PIN 8
+#define USBC_UART1_RX_PIN 9
 // I2C
-#define I2C1_SDA_PIN 14
-#define I2C1_SCL_PIN 15
+#define USBC_I2C1_SDA_PIN 14
+#define USBC_I2C1_SCL_PIN 15
 
 /**
  * Internal GPIO
@@ -43,14 +43,16 @@
 // PWM Buzzer
 #define BUZZER_PIN 19
 
-// I2C - For internal / external sensors
+// I2C0 - For internal / external sensors on Grove B
 #define I2C0_PWR_PIN 18
 #define I2C0_SDA_PIN 20
 #define I2C0_SCL_PIN 21
 
-// GPIO ADC (looks to be I2C compatible)
-#define GROVE_ADC1_PIN 26
-#define GROVE_ADC2_PIN 27
+// Grove A - ADC or I2C1
+#define GROVE_A_ADC0_PIN 26
+#define GROVE_A_ADC1_PIN 27
+#define GROVE_A_I2C1_SDA_PIN 26
+#define GROVE_A_I2C1_SCL_PIN 27
 
 /**
  * I2C Logical Settings
