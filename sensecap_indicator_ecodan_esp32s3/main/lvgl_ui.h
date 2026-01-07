@@ -3,6 +3,7 @@
 #pragma once
 
 #include "lvgl.h"
+#include "esp_lvgl_port.h"
 #include <stdio.h> // for printf()
 #include <freertos/FreeRTOS.h> // Needed before task.h
 #include <freertos/task.h>
@@ -10,8 +11,6 @@
 #include "esp_timer.h"
 
 #define CHART_FIFO_SIZE (86400 / 300)
-
-extern _lock_t lvgl_ui_lock;
 
 // Storage for button metadata in button callbacks
 typedef struct {

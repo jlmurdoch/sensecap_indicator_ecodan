@@ -186,7 +186,7 @@ static const char *TAG = "SenseCAP";
  * LVGL Variables
  */
 // LVGL is not thread safe, so we need a lock
-extern _lock_t lvgl_ui_lock;
+extern _lock_t lvgl_vanilla_lock;
 
 // FIFO circular buffer for datapoints
 extern int16_t datapoints_temp[CHART_FIFO_SIZE];

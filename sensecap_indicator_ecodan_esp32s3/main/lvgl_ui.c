@@ -111,7 +111,9 @@ void ui_update_clock(void *arg) {
     localtime_r(&now, &timeinfo);
     if (timeinfo.tm_sec == 0) {
         strftime(buf, sizeof(buf), "%H:%M", &timeinfo);
+        lvgl_port_lock(0);
         lv_subject_copy_string(&ui_clock_subj, buf);
+        lvgl_port_unlock();
     }
 }
 
@@ -141,21 +143,29 @@ void ui_update_sensors(uint8_t buf[34]) {
     uint16_t raw_temp = strtoul((char *)buf+7, NULL, 16);
     float temp = -45.0 + 175.0 * (raw_temp / 65535.0);
     char temp_text[6];
+    lvgl_port_lock(0);
     lv_snprintf(temp_text, sizeof(temp_text), "%d.%d", (int)temp, ((int)(temp * 10) % 10));
     lv_subject_copy_string(&ui_sensor_temp_subj, temp_text);
+    lvgl_port_unlock();
 
     // Update UI Relative Humidity
     uint16_t raw_relh = strtoul((char *)buf, NULL, 16);
     float human_relh = raw_relh / 65535.0 * 100.0;
+    lvgl_port_lock(0);
     lv_subject_set_int(&ui_sensor_rh_subj, (int32_t)human_relh);
+    lvgl_port_unlock();
 
     // Update UI CO2
     uint16_t raw_co2 = strtoul((char *)buf+14, NULL, 16);
+    lvgl_port_lock(0);
     lv_subject_set_int(&ui_sensor_co2_subj, (int32_t)raw_co2);
+    lvgl_port_unlock();
 
     // Update UI VOC
     int32_t raw_voc = strtoll((char *)buf+27, NULL, 16);
+    lvgl_port_lock(0);
     lv_subject_set_int(&ui_sensor_voc_subj, raw_voc);
+    lvgl_port_unlock();
 
     // Now store those datapoints with light conversion
     datapoints_co2[pos] = raw_co2;
@@ -167,7 +177,9 @@ void ui_update_sensors(uint8_t buf[34]) {
 }
 
 void ui_button_event_callback(lv_event_t *event) {
+    lvgl_port_lock(0);
     ui_button_event_user_data_t *user_data = lv_event_get_user_data(event);
+    lvgl_port_unlock();
 
     uint8_t button = user_data->button; // What did we click?
     int8_t value = user_data->value; // Up (+1), Down (-1) or value (+12)
@@ -177,6 +189,8 @@ void ui_button_event_callback(lv_event_t *event) {
 }
 
 void ui_chart_event_callback(lv_event_t *event) {
+    lvgl_port_lock(0);
+
     // Define what chart format / data
     chart_metadata_t *user_data = lv_event_get_user_data(event);
 
@@ -253,6 +267,7 @@ void ui_chart_event_callback(lv_event_t *event) {
     lv_obj_set_align(title, LV_ALIGN_TOP_MID);
     lv_label_set_text(title, user_data->title);
     lv_obj_set_style_text_font(title, &lv_font_montserrat_18, 0);
+    lvgl_port_unlock();
 }
 
 void ui_main(void) {  

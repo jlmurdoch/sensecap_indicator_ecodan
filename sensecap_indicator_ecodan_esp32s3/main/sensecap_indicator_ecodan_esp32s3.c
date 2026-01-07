@@ -15,8 +15,6 @@ TaskHandle_t uiButtonTaskHandle = NULL;
 TaskHandle_t edRxTaskHandle = NULL;
 TaskHandle_t rp2040TaskHandle = NULL;
 
-_lock_t lvgl_ui_lock;
-
 // WiFi Retry counter
 static int s_wifi_retry_num = 0;
 
@@ -45,6 +43,10 @@ sensecap_io_handle_t sensecap_io = {
     .touch = NULL,
     .panel = NULL
 };
+
+// for LVGL Port
+static lv_display_t *lvgl_disp = NULL;
+static lv_indev_t *lvgl_touch_indev = NULL;
 
 /**
  * @brief Non-ISR task to handle interrupts from the IO Expander
@@ -213,85 +215,6 @@ void wifi_init_sta(void)
 }
 
 /**
- * @brief Callback from LVGL to panel driver: flush/render data to the panel
- */
-static void lcd_panel_flush_callback(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
-    esp_lcd_panel_handle_t panel_handle = lv_display_get_user_data(disp);
-    int offsetx1 = area->x1;
-    int offsetx2 = area->x2;
-    int offsety1 = area->y1;
-    int offsety2 = area->y2;
-    // pass the draw buffer to the driver
-    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel_handle, offsetx1, offsety1, offsetx2 + 1, offsety2 + 1, px_map));
-    if ((offsetx1 > offsetx2) || (offsety1 > offsety2)) {
-        printf("%3d > %3d, %3d > %3d\n", offsetx1, offsetx2 + 1, offsety1,  offsety2 + 1);
-    }
-}
-
-/**
- * @brief Callback from panel driver to LVGL: flush/render of data is complete
- */
-static bool lcd_panel_flush_ready_callback(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *event_data, void *user_ctx) {
-    lv_display_t *disp = (lv_display_t *)user_ctx;
-    lv_display_flush_ready(disp);
-    return false;
-}
-
-/**
- * @brief Callback from LVGL to touch driver: get touch / coordinates
- */
-static void lcd_touch_read_callback(lv_indev_t *indev, lv_indev_data_t *data) {
-    uint8_t tp_points = 0;
-    esp_lcd_touch_data_t tp_data;
-
-    esp_lcd_touch_handle_t tp = lv_indev_get_user_data(indev);
-    ESP_ERROR_CHECK(esp_lcd_touch_read_data(tp));
-    ESP_ERROR_CHECK(esp_lcd_touch_get_data(tp, tp_data.coords, &tp_points, 1));
-
-    // If touched and more than one point, set state as pressed
-    if(tp_points > 0) {
-        data->state = LV_INDEV_STATE_PRESSED;
-        data->point.x = tp_data.coords->x;
-        data->point.y = tp_data.coords->y;
-        printf("Touch at %ld x %ld\n", data->point.x, data->point.y );
-    } else {
-        data->state = LV_INDEV_STATE_RELEASED;
-    }
-}
-
-/**
- * @brief Increment the LVGL tick timer
- */
-static void lv_tick_task(void *arg) {
-    (void) arg;
-
-    lv_tick_inc(1);
-}
-
-/**
- * @brief Task to manage the execution of lv_timer_handler()
- */
-static void manage_lv_timer_handler_task(void *arg)
-{
-    uint32_t task_delay_ms = 0;
-    while (1) {
-        _lock_acquire(&lvgl_ui_lock);
-        task_delay_ms = lv_timer_handler();
-        _lock_release(&lvgl_ui_lock);
-
-        // Max time is 500ms
-        if (task_delay_ms > 500) {
-            task_delay_ms = 500;
-        // Min time is 1 or 10 depending on sdkconfig
-        } else if (task_delay_ms < (1000 / CONFIG_FREERTOS_HZ)) {
-            task_delay_ms = 1000 / CONFIG_FREERTOS_HZ;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(task_delay_ms));
-    }
-}
-
-/**
  * @brief Control the LCD Backlight using PWM
  * @note This uses LEDC (LED Control) from ESP-IDF 
  */
@@ -404,6 +327,8 @@ void sensecap_indicator_lcd_drivers_init(sensecap_io_handle_t *sci_io) {
         .dma_burst_size = 64,
         .num_fbs = 2,
         .clk_src = LCD_CLK_SRC_PLL240M,
+        // .in_color_format = LCD_COLOR_FMT_RGB565, // New
+        .bits_per_pixel = 16, // Old
         .disp_gpio_num = LCD_IO_RGB_DISP_EN,
         .pclk_gpio_num = LCD_IO_RGB_PCLK,
         .vsync_gpio_num = LCD_IO_RGB_VSYNC,
@@ -439,9 +364,8 @@ void sensecap_indicator_lcd_drivers_init(sensecap_io_handle_t *sci_io) {
             .vsync_front_porch = 10,
             .flags.pclk_active_neg = false,
         },
-        .flags = {
-            .fb_in_psram = true, // allocate framebuffer from PSRAM
-        }
+        .flags.fb_in_psram = true, // allocate framebuffer from PSRAM
+        .bounce_buffer_size_px = LCD_RES_H * 10,
     };
 
     // Create a vendor-specific panel config subset
@@ -464,101 +388,74 @@ void sensecap_indicator_lcd_drivers_init(sensecap_io_handle_t *sci_io) {
     
     // Create the panel
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7701(panel_io_handle, &panel_config, &sci_io->panel));
-    // Initialise the panel - this will also turn it on, so we can delete the SPI IO
+    // Initialis*e the panel - this will also turn it on, so we can delete the SPI IO
     ESP_ERROR_CHECK(esp_lcd_panel_init(sci_io->panel));
 }
 
 /**
  * @brief Initialise LVGL, panel, touchscreen
- * @param i2c_handle Handle for the I2C bus
- * @param io_expander Handle for an IO Expander
- * @return `lv_disp_t` - Handle for the display
+ * @param sci_io Handle for the SenseCAP IO handles
+ * @return `esp_err_t` - ESP error code
  * @note Following the process here: https://docs.lvgl.io/master/integration/overview/connecting_lvgl.html
  */
-static lv_disp_t *lcd_display_init(sensecap_io_handle_t *sci_io) {
+static esp_err_t lcd_display_init_lvgl_port(sensecap_io_handle_t *sci_io) {
     /**
      * 1. Initialise LVGL
      */
-    _lock_acquire(&lvgl_ui_lock);
-    lv_init();
-    _lock_release(&lvgl_ui_lock);
+    const lvgl_port_cfg_t lvgl_cfg = {
+        .task_priority = 4,         /* LVGL task priority */
+        .task_stack = 6144,         /* LVGL task stack size */
+        .task_affinity = -1,        /* LVGL task pinned to core (-1 is no affinity) */
+        .task_max_sleep_ms = 500,   /* Maximum sleep in LVGL task */
+        .timer_period_ms = 5        /* LVGL timer tick period in ms */
+    };
+    ESP_RETURN_ON_ERROR(lvgl_port_init(&lvgl_cfg), TAG, "LVGL port initialization failed");
 
     /**
      * 2. Initialise Panel & Touch Drivers
      */
+
+    // Function to init drivers
     sensecap_indicator_lcd_drivers_init(sci_io);
 
-    /**
-     * 3. Tick Interface
-     * @note - Only needs to be a 1ms resolution
-     * @note - Easier to set up a periodic timer (Option 2) than use `lv_tick_set_cb` (Option 1)
-     */
-    esp_timer_handle_t periodic_timer;
-    // Callback setup for tick timer
-    const esp_timer_create_args_t periodic_timer_args = {
-        .callback = &lv_tick_task,
-        .name = "timer_lv_tick"
+    uint32_t buff_size = LCD_RES_H * LCD_RES_V;
+    ESP_LOGD(TAG, "Add LCD screen");
+    const lvgl_port_display_cfg_t disp_cfg = {
+        .panel_handle = sci_io->panel,
+        .buffer_size = buff_size,
+        .double_buffer = false,
+        .hres = LCD_RES_H,
+        .vres = LCD_RES_V,
+        .monochrome = false,
+        .color_format = LV_COLOR_FORMAT_RGB565,
+        .rotation = {
+            .swap_xy = false,
+            .mirror_x = false,
+            .mirror_y = false,
+        },
+        .flags = {
+            .buff_dma = false,
+            .buff_spiram = false,
+            .direct_mode = true,
+            .swap_bytes = false,
+        }
     };
-    // Instantiate the tick timer
-    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
-    // Trigger tick increment every 1000us / 1ms
-    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000));
-
-    /**
-     * 4. Display Interface
-     */
-    // Double framebuffers
-    void *fb1 = NULL;
-    void *fb2 = NULL;
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(sci_io->panel, 2, &fb1, &fb2));
-    
-    // Create display with size
-    _lock_acquire(&lvgl_ui_lock);
-    lv_display_t *display = lv_display_create(LCD_RES_H, LCD_RES_V);
-
-    // Set display pixel format
-    lv_display_set_color_format(display, LV_COLOR_FORMAT_RGB565);
-
-    // Set buffers for display
-    lv_display_set_buffers(display, fb1, fb2, LCD_RES_H * LCD_RES_V * lv_color_format_get_size(lv_display_get_color_format(display)), LV_DISPLAY_RENDER_MODE_DIRECT);
-
-    // Associate RGB panel with LVGL display for callback
-    lv_display_set_user_data(display, sci_io->panel);
-
-    // Create flush callback for lvgl
-    lv_display_set_flush_cb(display, lcd_panel_flush_callback); 
-    // Create flush callback for panel
-    esp_lcd_rgb_panel_event_callbacks_t panel_callbacks = {
-        .on_color_trans_done = lcd_panel_flush_ready_callback,
+    assert(sci_io->panel);
+    const lvgl_port_display_rgb_cfg_t rgb_cfg = {
+        .flags = {
+            .bb_mode = true,
+            .avoid_tearing = true,
+        }
     };
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_register_event_callbacks(sci_io->panel, &panel_callbacks, display));
+    lvgl_disp = lvgl_port_add_disp_rgb(&disp_cfg, &rgb_cfg);
 
-    /**
-     * 5. Input-Device Interface (indev)
-     */
-    lv_indev_t *indev = lv_indev_create();
-    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
-    lv_indev_set_display(indev, display);
-    lv_indev_set_user_data(indev, sci_io->touch);
-    lv_indev_set_read_cb(indev, lcd_touch_read_callback);
+    const lvgl_port_touch_cfg_t touch_cfg = {
+        .disp = lvgl_disp,
+        .handle = sci_io->touch,
+    };
+    lvgl_touch_indev = lvgl_port_add_touch(&touch_cfg);
 
-    /**
-     * 6. Manage LVGL timers
-     */
-    // High priority (2) task to call the LVGL timer in a controlled, thread-safe fashion on core 0
-    xTaskCreatePinnedToCore(manage_lv_timer_handler_task, "LVGL Timer Handler Task", 10480, NULL, 2, NULL, PRO_CPU);
-
-    /**
-     * 7. Set a theme
-     */
-    lv_theme_t *theme = lv_theme_default_init(display, lv_palette_main(LV_PALETTE_BLUE), lv_palette_main(LV_PALETTE_CYAN),
-                                            LV_THEME_DEFAULT_DARK, LV_FONT_DEFAULT);
-
-    lv_display_set_theme(display, theme); /* Assign theme to display */
-
-    _lock_release(&lvgl_ui_lock);
-
-    return display;
+    return ESP_OK;
 }
 
 /**
@@ -864,7 +761,7 @@ uint8_t ecodan_validate (ecodan_frame_t frame) {
 
 void ecodan_process(ecodan_frame_t frame) {
     char buf[6];
-    _lock_acquire(&lvgl_ui_lock);
+    lvgl_port_lock(0);
     switch (frame.pkt.msg.type)
     {
     case 0x43:
@@ -934,7 +831,7 @@ void ecodan_process(ecodan_frame_t frame) {
     default:
         break;
     }
-    _lock_release(&lvgl_ui_lock);
+    lvgl_port_unlock();
 }
 
 void uart_init(void) {
@@ -980,6 +877,7 @@ void rp2040_buffer_task(void *pvParameters) {
         if (uart_len == 34) {
             // Read in the UART bytes
             uart_read_bytes(UART_NUM_2, uart_buf, uart_len, 100 / portTICK_PERIOD_MS);
+            printf("UART: %s\n", uart_buf);
             ui_update_sensors(uart_buf);
         } else if (uart_len > 34) {
             // Flush out any UART noise
@@ -1069,7 +967,7 @@ void app_main(void)
     // IO Expander - LCD, Touch, SX1262, RP2040
     ioexp_init(&sensecap_io);
     // LCD Display - has to be done before any other SPI device
-    lcd_display_init(&sensecap_io);
+    lcd_display_init_lvgl_port(&sensecap_io);
     lcd_backlight_init(LCD_BACKLIGHT);
 
     // Create clean SPI for SX1262 
@@ -1085,9 +983,9 @@ void app_main(void)
     ntp_init();
  
     // UI Initialisation
-    _lock_acquire(&lvgl_ui_lock);
+    lvgl_port_lock(0);
     ui_main();
-    _lock_release(&lvgl_ui_lock);
+    lvgl_port_unlock();
 
     /************************************
      * Task Setup 
